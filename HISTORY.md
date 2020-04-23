@@ -1,5 +1,50 @@
 # Revision Change History
 
+## [0.7.2]
+
+### Fixes
+
+- Fixed an issue causing 100% cpu usage introduced in the scene sync code.
+  ([Issue #195)[I195])
+
+## [0.7.1]
+
+### Fixes
+
+- Fixed a coding bug when running sync-all ([Issue #192][I192])
+  (thanks @krkeegan)
+
+- Fixed a coding bug when running sync on the modem ([Issue #193][I193])
+  (thanks @krkeegan)
+
+
+## [0.7.0]
+
+### Additions
+- Thanks to @krkeegan, scene management and syncing are now supported.  This
+  allows you to define all of your Insteon scenes in a configuration file and
+  have the system sync your devices to that file. ([Issue #25][I25],
+  [Issue #179][I179])
+
+- Enable software control of motion sensor flags ([Issue #184][I184])
+  (thanks @krkeegan)
+
+- Added support for single button remotes ([Issue #185][I185])
+  (thanks @krkeegan)
+
+- Added an option to skip battery devices when doing a refresh and a new
+  command to get the engine version (for older I1 devices) ([Issue #189][I189])
+  (thanks @krkeegan)
+
+
+### Fixes
+- Fixed an error in the Thermostat MQTT code preventing user specified topics
+  ([Issue #182][I182]) (thanks @krkeegan)
+
+- Fixed issues with handling housekeeping messages sent to the model during
+  a scene command.  ([Issue #183][I183]) (thanks @krkeegan)
+
+
 ## [0.6.9]
 
 ### Additions
@@ -10,7 +55,31 @@
   as an optional input for input commands.  This allows for automations to
   change behavior based on why something changed. ([Issue #138][I138])
 
+- Added KeypadLinc low level set_flags commands to modify: load (de)attached,
+  button follow masks, button off masks, non-toggle buttons.  (thanks
+  @jrevans).
+
+- Added KeypadLinc support for turning of the backlight completely (thanks
+  @jrevans).
+
 ### Fixes
+- Fixed bug in message emits for battery sensors. ([Issue #157][I157])
+
+- Fixed bug in thermostat not reporting humidity changes ([Issue #160][I160])
+
+- Updated hassio config file to include the required arch listing.
+  ([Issue #139][I139])
+
+- Added docker builds for hassio from my repo (td22057) ([Issue #148][I148])
+
+- Fixed bug in motion sensor replies to a model info request
+  ([Issue #163][I163]).
+
+- Fixed bug in thermostat ambient temperature calculation ([Issue #142][I142])
+  (thanks @krkeegan).
+
+- Fixed bug in KeypadLinc, FanLinc, and Outlet for non-group 1 links
+  ([Issue #159][I159]) (thanks @chris153002).
 
 
 ## [0.6.8]
@@ -247,6 +316,7 @@
 [I20]: https://github.com/TD22057/insteon-mqtt/issues/20
 [I21]: https://github.com/TD22057/insteon-mqtt/issues/21
 [I24]: https://github.com/TD22057/insteon-mqtt/issues/24
+[I25]: https://github.com/TD22057/insteon-mqtt/issues/25
 [I27]: https://github.com/TD22057/insteon-mqtt/issues/27
 [I28]: https://github.com/TD22057/insteon-mqtt/issues/28
 [I29]: https://github.com/TD22057/insteon-mqtt/issues/29
@@ -277,3 +347,19 @@
 [I132]: https://github.com/TD22057/insteon-mqtt/issues/132
 [I136]: https://github.com/TD22057/insteon-mqtt/issues/136
 [I138]: https://github.com/TD22057/insteon-mqtt/issues/138
+[I139]: https://github.com/TD22057/insteon-mqtt/issues/139
+[I142]: https://github.com/TD22057/insteon-mqtt/issues/142
+[I148]: https://github.com/TD22057/insteon-mqtt/issues/148
+[I157]: https://github.com/TD22057/insteon-mqtt/issues/157
+[I159]: https://github.com/TD22057/insteon-mqtt/issues/159
+[I160]: https://github.com/TD22057/insteon-mqtt/issues/160
+[I163]: https://github.com/TD22057/insteon-mqtt/issues/163
+[I179]: https://github.com/TD22057/insteon-mqtt/issues/179
+[I182]: https://github.com/TD22057/insteon-mqtt/issues/182
+[I183]: https://github.com/TD22057/insteon-mqtt/issues/183
+[I184]: https://github.com/TD22057/insteon-mqtt/issues/184
+[I185]: https://github.com/TD22057/insteon-mqtt/issues/185
+[I189]: https://github.com/TD22057/insteon-mqtt/issues/189
+[I192]: https://github.com/TD22057/insteon-mqtt/issues/192
+[I193]: https://github.com/TD22057/insteon-mqtt/issues/193
+[I195]: https://github.com/TD22057/insteon-mqtt/issues/195
