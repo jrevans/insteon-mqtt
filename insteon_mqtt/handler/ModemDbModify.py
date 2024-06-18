@@ -43,6 +43,9 @@ class ModemDbModify(Base):
         self.entry = entry
         self.existing_entry = existing_entry
 
+        # Is this a retry of an ADD or UPDATE?  This prevents endless loops
+        self.is_retry = False
+
         # Tuple of (msg, entry) to send next.  If the first calls ACK's,
         # we'll update self.entry and send the next msg and continue until
         # this is empty.
@@ -78,14 +81,88 @@ class ModemDbModify(Base):
           Msg.CONTINUE if we handled the message and expect more.
           Msg.FINISHED if we handled the message and are done.
         """
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
+
         # Not a message for us.
         if not isinstance(msg, Msg.OutAllLinkUpdate):
             return Msg.UNKNOWN
 
         # If we get a NAK message, signal an error and stop.
         if not msg.is_ack:
-            LOG.error("Modem db updated failed: %s", msg)
-            self.on_done(False, "Modem database update failed", self.entry)
+            if msg.cmd == Msg.OutAllLinkUpdate.Cmd.DELETE:
+                # A failed delete only happens.
+                LOG.error("Modem db delete failed: %s", msg)
+                self.on_done(False, "Delete entry from Modem db failed, " +
+                             "entry likely doesn't exist, try running " +
+                             "`refresh modem`", self.entry)
+
+            elif self.is_retry:
+                # A failed retry, stop to prevent infinite looping
+                LOG.error("Modem db update failed: %s", msg)
+                self.on_done(False, "Write to Modem db failed, try running " +
+                             "`refresh modem`", self.entry)
+
+            elif msg.cmd == Msg.OutAllLinkUpdate.Cmd.UPDATE:
+                LOG.info("DB record didn't exist, adding %s grp: %s data: %s",
+                         msg.addr, msg.group, msg.data.hex())
+                # There is no entry matching this on the device.  Create one
+                # instead.  There is no need to delete the wrong cached entry
+                # it will be replaced on when this record is added by the
+                # deduplication in add_entry
+                cmd = Msg.OutAllLinkUpdate.Cmd.ADD_RESPONDER
+                if self.entry.is_controller:
+                    cmd = Msg.OutAllLinkUpdate.Cmd.ADD_CONTROLLER
+
+                # Create the flags for the entry.
+                db_flags = Msg.DbFlags(in_use=True,
+                                       is_controller=self.entry.is_controller,
+                                       is_last_rec=False)
+
+                # Build the modem database add message.
+                msg = Msg.OutAllLinkUpdate(cmd, db_flags, self.entry.group,
+                                           self.entry.addr, self.entry.data)
+
+                # Set retry to prevent infinite loops
+                self.is_retry = True
+
+                # Send the message.
+                self._PLM_sent = False
+                self._PLM_ACK = False
+                self.db.device.send(msg, self)
+
+            elif (msg.cmd == Msg.OutAllLinkUpdate.Cmd.ADD_RESPONDER or
+                  msg.cmd == Msg.OutAllLinkUpdate.Cmd.ADD_CONTROLLER):
+                LOG.info("DB record exists, updating %s grp: %s data: %s",
+                         msg.addr, msg.group, msg.data.hex())
+                # There is an entry matching this on the device already.
+                # So save it to the database.  And mark as the existing
+                # entry for after the update.
+                self.db.add_entry(self.entry)
+                self.existing_entry = self.entry
+
+                # Do an update
+                cmd = Msg.OutAllLinkUpdate.Cmd.UPDATE
+
+                # Create the flags for the entry.
+                db_flags = Msg.DbFlags(in_use=True,
+                                       is_controller=self.entry.is_controller,
+                                       is_last_rec=False)
+
+                # Build the modem database update message.
+                msg = Msg.OutAllLinkUpdate(cmd, db_flags, self.entry.group,
+                                           self.entry.addr, self.entry.data)
+
+                # Set retry to prevent infinite loops
+                self.is_retry = True
+
+                # Send the message.
+                self._PLM_sent = False
+                self._PLM_ACK = False
+                self.db.device.send(msg, self)
+
+            # No matter what, all these messages are finished.
             return Msg.FINISHED
 
         # ACK of a message to delete an existing entry
@@ -96,7 +173,7 @@ class ModemDbModify(Base):
         # ACK of an Update an existing entry w/ new data fields.
         elif msg.cmd == Msg.OutAllLinkUpdate.Cmd.UPDATE:
             LOG.info("Updating modem db record for %s grp: %s data: %s",
-                     msg.addr, msg.group, msg.data)
+                     msg.addr, msg.group, msg.data.hex())
 
             assert self.existing_entry
 
@@ -112,7 +189,7 @@ class ModemDbModify(Base):
               msg.cmd == Msg.OutAllLinkUpdate.Cmd.ADD_RESPONDER):
             LOG.info("Adding modem db record for %s type: %s grp: %s data: %s",
                      msg.addr, util.ctrl_str(msg.db_flags.is_controller),
-                     msg.group, msg.data)
+                     msg.group, msg.data.hex())
 
             # This will also save the database.
             self.db.add_entry(self.entry)
@@ -121,7 +198,10 @@ class ModemDbModify(Base):
         if self.next:
             LOG.info("Sending next modem db update")
             msg, self.entry = self.next.pop(0)
-            protocol.send(msg, self)
+            # Reset the PLM Flags
+            self._PLM_ACK = False
+            self._PLM_sent = False
+            self.db.device.send(msg, self)
 
         # Only run the callback if this is the last message in the chain.
         else:

@@ -5,15 +5,15 @@
 #===========================================================================
 import io
 import json
-import os
 from ..Address import Address
+from .. import catalog
 from .. import handler
 from .. import log
 from .. import message as Msg
 from .. import util
 from .ModemEntry import ModemEntry
 from .DbDiff import DbDiff
-from ..CommandSeq import CommandSeq
+
 
 LOG = log.get_logger()
 
@@ -53,10 +53,17 @@ class Modem:
         """
         obj = Modem(path, device)
         for d in data['entries']:
-            obj.add_entry(ModemEntry.from_json(d), save=False)
+            obj.add_entry(ModemEntry.from_json(d, db=obj), save=False)
 
         # pylint: disable=protected-access
         obj._meta = data.get('meta', {})
+
+        # Load the category fields and turn them into description objecdt.
+        dev_cat = data.get('dev_cat', None)
+        sub_cat = data.get('sub_cat', None)
+        obj.desc = None
+        if dev_cat is not None:
+            obj.desc = catalog.find(dev_cat, sub_cat)
 
         return obj
 
@@ -72,6 +79,10 @@ class Modem:
 
         # Note: unlike devices, the PLM has no delta value so there doesn't
         # seem to be any way to tell if the db value is current or not.
+
+        # Device model information.
+        self.desc = None
+        self.firmware = None
 
         # Metadata storage.  Used for saving device data to persistent
         # storage for access across reboots
@@ -99,6 +110,49 @@ class Modem:
                   made.
         """
         self.save_path = path
+
+    #-----------------------------------------------------------------------
+    def set_info(self, dev_cat, sub_cat, firmware):
+        """Saves the device information to file.
+
+        Insteon devices are each assigned to a broad device category.
+        Individual devices each then have a subcategory.  See the catalog.py
+        module for details.
+
+        Within the broad device category, insteon devices are assigned to a
+        more narrow sub category.  Generally a sub-category remains
+        consistent throughout a single model number of a a product, however
+        not always.  Smart Labs has done a poor job of publishing the details
+        of the sub-categories.  Some resources for determining the details of
+        a sub-category are:
+
+        http://cache.insteon.com/pdf/INSTEON_DevCats_and_Product_Keys_20081008.pdf
+        http://madreporite.com/insteon/Insteon_device_list.htm
+
+        Generally knowing the dev_Cat and sub_Cat is sufficient for
+        determining the features that are available on a device.
+        Additionally knowing the engine version of the device is also another
+        good indicator.
+
+        The firmware version of a device is just that, the version number of
+        the embedded code on the device.  In theory, this firmware is
+        updatable (although not by a casual user), however Smart Labs has
+        never published an update for any device.
+
+        That said, it does seem that Smart Labs routinely updates the
+        firmware that is installed on devices before they are sold.  However,
+        Smart Labs does not publish changelogs, nor does it discuss what
+        changes have been made.  Based on anecdotal evidence, few if any
+        changes in firmware have added any features to a device.
+
+        Args:
+          dev_cat (int):  The device category.
+          sub_cat (int):  The device sub-category.
+          firmware (int): The device firmware.
+        """
+        self.desc = catalog.find(dev_cat, sub_cat)
+        self.firmware = firmware
+        self.save()
 
     #-----------------------------------------------------------------------
     def set_meta(self, key, value):
@@ -145,8 +199,8 @@ class Modem:
         return len(self.entries)
 
     #-----------------------------------------------------------------------
-    def next_group(self):
-        """Find the next free internal PLM group number that is available.
+    def empty_groups(self):
+        """Get a list of the unused internal PLM group numbers
 
         This is used to find an available group number for creating a virtual
         modem scene.  The modem supports 1-255 for groups.  Groups 1-8 are
@@ -154,13 +208,14 @@ class Modem:
         device for the device button group to send it a simulated scene.
 
         Returns:
-          (int) Returns the next group number of None if there are none.
+          (array) Returns a list of the empty groups
         """
+        ret = []
         for i in range(GROUP_START, 255):
             if i not in self.groups:
-                return i
+                ret.append(i)
 
-        return None
+        return ret
 
     #-----------------------------------------------------------------------
     def delete_entry(self, entry):
@@ -173,8 +228,15 @@ class Modem:
                   or an exception is raised.
         """
         self.entries.remove(entry)
+
         if entry.is_controller:
-            del self.groups[entry.group]
+            responders = self.groups.get(entry.group)
+            if responders:
+                if entry in responders:
+                    responders.remove(entry)
+
+            elif entry.group in self.groups:
+                del self.groups[entry.group]
 
         self.save()
 
@@ -188,10 +250,7 @@ class Modem:
         self.entries = []
         self.groups = {}
         self.aliases = {}
-        self._meta = {}
-
-        if self.save_path and os.path.exists(self.save_path):
-            os.remove(self.save_path)
+        self.save()
 
     #-----------------------------------------------------------------------
     def find_group(self, group):
@@ -213,7 +272,7 @@ class Modem:
 
         Args:
           addr:           (Address) The address to match.
-n          group:          (int) The group to match.
+          group:          (int) The group to match.
           is_controller:  (bool) True for controller records.  False for
                           responder records.
 
@@ -261,7 +320,7 @@ n          group:          (int) The group to match.
         return results
 
     #-----------------------------------------------------------------------
-    def add_on_device(self, protocol, entry, on_done=None):
+    def add_on_device(self, entry, on_done=None):
         """Add an entry and push the entry to the Insteon modem.
 
         This sends the input record to the Insteon modem.  If that command
@@ -276,22 +335,12 @@ n          group:          (int) The group to match.
         If the entry already exists, nothing will be done.
 
         Args:
-          protocol:      (Protocol) The Insteon protocol object to use for
-                         sending messages.
           entry:         (ModemEntry) The entry to add.
           on_done:       Optional callback which will be called when the
                          command completes.
         """
         exists = self.find(entry.addr, entry.group, entry.is_controller)
         if exists:
-            if exists.data == entry.data:
-                LOG.warning("Modem add db already exists for %s grp %s %s",
-                            entry.addr, entry.group,
-                            util.ctrl_str(entry.is_controller))
-                if on_done:
-                    on_done(True, "Entry already exists", exists)
-                return
-
             cmd = Msg.OutAllLinkUpdate.Cmd.UPDATE
 
         elif entry.is_controller:
@@ -311,17 +360,11 @@ n          group:          (int) The group to match.
         msg_handler = handler.ModemDbModify(self, entry, exists, on_done)
 
         # Send the message.
-        protocol.send(msg, msg_handler)
+        self.device.send(msg, msg_handler)
 
     #-----------------------------------------------------------------------
-    def delete_on_device(self, protocol, entry, on_done=None):
-        """Delete a series of entries on the device.
-
-        This will delete ALL the entries for an address and group.  The modem
-        doesn't support deleting a specific controller or responder entry -
-        it just deletes the first one that matches the address and group.  To
-        avoid confusion about this, this method delete all the entries
-        (controller and responder) that match the inputs.
+    def delete_on_device(self, entry, on_done=None):
+        """Delete an entry on the device.
 
         The on_done callback will be passed a success flag (True/False), a
         string message about what happened, and the DeviceEntry that was
@@ -329,8 +372,6 @@ n          group:          (int) The group to match.
           on_done( success, message, ModemEntry )
 
         Args:
-          protocol:      (Protocol) The Insteon protocol object to use for
-                         sending messages.
           addr:          (Address) The address to delete.
           group:         (int) The group to delete.
           on_done:       Optional callback which will be called when the
@@ -338,66 +379,17 @@ n          group:          (int) The group to match.
         """
         on_done = util.make_callback(on_done)
 
-        # Find all the entries that match the addr and group inputs.
-        entries = self.find_all(entry.addr, entry.group)
-
-        # The modem will erase entries in the order it finds them - we can't
-        # erase a specific entry.  So find the ctrl/resp entry we want and
-        # see if there is a different entry first - if there is call delete
-        # until we delete the one we actually want and then restore the other
-        # entry after we're done.
-        #
-        # In a proper database, we should only have found 1 or 2 entries but
-        # it's possible to push duplicate records into the db.  So just find
-        # the first entry that matches our request and only restore one other
-        # which which be the opposite ctrl/responder flag version.
-        restore = None
-        erase_idx = None
-        for i in range(len(entries)):
-            if entries[i].is_controller == entry.is_controller:
-                erase_idx = i
-                break
-
-            if not restore:
-                restore = entries[i]
-
-        # Since the entry was passed in, it must exist.
-        assert erase_idx is not None
-
-        LOG.debug("Modem delete idx %d of [0,%d) entries", erase_idx,
-                  len(entries))
-
-        # Build the first delete message.  The Handler will remove the
-        # entries from our db when it get's an ACK.
-        #
-        # Modem will only delete if we pass it an empty flags input (see the
-        # method docs).  This deletes the first entry in the database that
-        # matches the inputs.
-        db_flags = Msg.DbFlags.from_bytes(bytes(1))
+        # Build the delete message.  The Data1-3 values are always 0x00 as
+        # they are ignored by the modem.
+        db_flags = Msg.DbFlags(in_use=True,
+                               is_controller=entry.is_controller,
+                               is_last_rec=False)
         msg = Msg.OutAllLinkUpdate(Msg.OutAllLinkUpdate.Cmd.DELETE, db_flags,
                                    entry.group, entry.addr, bytes(3))
-        msg_handler = handler.ModemDbModify(self, entries[0], on_done=on_done)
+        msg_handler = handler.ModemDbModify(self, entry, on_done=on_done)
 
-        # Add the other delete calls to the handler - these will run in
-        # sequence as we get ACKs for each call.  The final call will call
-        # the on_done() callback.
-        for i in range(1, erase_idx + 1):
-            msg_handler.add_update(msg, entries[i])
-
-        # Add a command to restore the entry we didn't want to delete.
-        if restore:
-            if restore.is_controller:
-                cmd = Msg.OutAllLinkUpdate.Cmd.ADD_CONTROLLER
-            else:
-                cmd = Msg.OutAllLinkUpdate.Cmd.ADD_RESPONDER
-
-            msg2 = Msg.OutAllLinkUpdate(cmd, db_flags, restore.group,
-                                        restore.addr, restore.data)
-            msg_handler.add_update(msg2, restore)
-
-        # Send the first message.  If it ACK's, it will keep sending more
-        # deletes - one per entry.
-        protocol.send(msg, msg_handler)
+        # Send the message.
+        self.device.send(msg, msg_handler)
 
     #-----------------------------------------------------------------------
     def diff(self, rhs):
@@ -479,24 +471,6 @@ n          group:          (int) The group to match.
         return delta
 
     #-----------------------------------------------------------------------
-    def apply_diff(self, device, diff, on_done=None):
-        """TODO: doc
-        """
-        assert diff.addr is None  # Modem db doesn't have address
-
-        seq = CommandSeq(device, "Modem database sync complete", on_done)
-
-        # Start by removing all the entries we don't need.
-        for entry in diff.del_entries:
-            seq.add(self.delete_on_device, device.protocol, entry)
-
-        # Add the missing entries.
-        for entry in diff.add_entries:
-            seq.add(self.add_on_device, device.protocol, entry)
-
-        seq.run()
-
-    #-----------------------------------------------------------------------
     def to_json(self):
         """Convert the database to JSON format.
 
@@ -504,10 +478,14 @@ n          group:          (int) The group to match.
           (dict) Returns the database as a JSON dictionary.
         """
         entries = [i.to_json() for i in self.entries]
-        return {
+        data = {
             'entries' : entries,
             'meta' : self._meta
             }
+        if self.desc:
+            data['dev_cat'] = self.desc.dev_cat
+            data['sub_cat'] = self.desc.sub_cat
+        return data
 
     #-----------------------------------------------------------------------
     def __str__(self):
@@ -518,7 +496,7 @@ n          group:          (int) The group to match.
 
         o.write("GroupMap\n")
         for grp, elem in self.groups.items():
-            o.write("  %s -> %s\n" % (grp, [i.addr.hex for i in elem]))
+            o.write("  %s -> %s\n" % (grp, [i.label for i in elem]))
 
         return o.getvalue()
 
@@ -570,7 +548,7 @@ n          group:          (int) The group to match.
         if remote.is_controller:
             group = remote.group
         entry = ModemEntry(remote.addr, group, local.is_controller,
-                           local.link_data)
+                           local.link_data, db=self)
 
         # Add the Entry to the DB
         self.add_entry(entry, save=False)

@@ -183,6 +183,7 @@ def scene(args, config):
         "cmd" : "scene",
         "is_on" : bool(args.is_on),
         "reason" : args.reason,
+        "level": args.level
         }
 
     try:
@@ -202,12 +203,6 @@ def pair(args, config):
         }
 
     reply = util.send(config, topic, payload, args.quiet)
-
-    if reply["status"]:
-        print("Pairing may fail if the modem db is out of date.  Try running")
-        print("the following and then re-try the pair command.")
-        print("   insteont-mqtt config.py refresh modem")
-
     return reply["status"]
 
 
@@ -311,6 +306,63 @@ def import_scenes(args, config):
         "cmd" : "import_scenes",
         "dry_run" : not args.run
         }
+
+    reply = util.send(config, topic, payload, args.quiet)
+    return reply["status"]
+
+
+#===========================================================================
+def awake(args, config):
+    topic = "%s/%s" % (args.topic, args.address)
+    payload = {
+        "cmd" : "awake",
+        }
+
+    reply = util.send(config, topic, payload, args.quiet)
+    return reply["status"]
+
+
+#===========================================================================
+def get_battery_voltage(args, config):
+    topic = "%s/%s" % (args.topic, args.address)
+    payload = {
+        "cmd" : "get_battery_voltage",
+        }
+
+    reply = util.send(config, topic, payload, args.quiet)
+    return reply["status"]
+
+
+#===========================================================================
+def set_low_battery_voltage(args, config):
+    topic = "%s/%s" % (args.topic, args.address)
+    payload = {
+        "cmd" : "set_low_battery_voltage",
+        "voltage" : args.voltage
+        }
+
+    reply = util.send(config, topic, payload, args.quiet)
+    return reply["status"]
+
+
+#===========================================================================
+def send_raw_command(args, config):
+    topic = "%s/%s" % (args.topic, args.address)
+    payload = {
+        "cmd" : "raw_command",
+        "cmd1": args.cmd1,
+        "cmd2": args.cmd2,
+        "ext_resp": args.ext_resp
+        }
+
+    if args.ext_req:
+        payload["data"] = []
+
+    if args.data:
+        payload["data"] = args.data[:14]
+
+    if args.crc:
+        payload["crc_type"] = args.crc
 
     reply = util.send(config, topic, payload, args.quiet)
     return reply["status"]

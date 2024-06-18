@@ -18,7 +18,7 @@ class DeviceDbModify(Base):
     modifications to the device's all link database class to reflect what
     happened on the physical device.
     """
-    def __init__(self, device_db, entry, on_done=None):
+    def __init__(self, device_db, entry, on_done=None, num_retry=3):
         """Constructor
 
         Args:
@@ -29,7 +29,7 @@ class DeviceDbModify(Base):
                     added to the handler.  Signature is:
                     on_done(success, msg, entry)
         """
-        super().__init__(on_done)
+        super().__init__(on_done, num_retry)
 
         self.db = device_db
         self.entry = entry
@@ -50,11 +50,15 @@ class DeviceDbModify(Base):
           Msg.CONTINUE if we handled the message and expect more.
           Msg.FINISHED if we handled the message and are done.
         """
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
         if isinstance(msg, Msg.OutExtended):
             # See if the message address matches our expected reply.
             if msg.to_addr == self.db.addr and msg.cmd1 == 0x2f:
                 # ACK - command is ok - wait for ACK from device.
                 if msg.is_ack:
+                    self._PLM_ACK = True
                     return Msg.CONTINUE
 
                 # NAK - device rejected command.
@@ -63,7 +67,7 @@ class DeviceDbModify(Base):
                     self.on_done(False, "Device database update failed", None)
                     return Msg.FINISHED
 
-        elif isinstance(msg, Msg.InpStandard):
+        elif isinstance(msg, Msg.InpStandard) and self._PLM_ACK:
             # See if the message address matches our expected reply.
             if msg.from_addr == self.db.addr and msg.cmd1 == 0x2f:
                 # ACK or NAK - either way this transaction is complete.
@@ -72,14 +76,24 @@ class DeviceDbModify(Base):
                     # entry, or an marked unused (deletion).
                     LOG.info("Updating entry: %s", self.entry)
                     self.db.add_entry(self.entry)
+                    # Increment the delta 1
+                    self.db.increment_delta()
                     self.on_done(True, "Device database update complete",
                                  self.entry)
 
                 elif msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-                    LOG.error("%s db mod NAK: %s, Message: %s", self.db.addr,
-                              msg.nak_str(), msg)
-                    self.on_done(False, "Device database update failed. " +
-                                 msg.nak_str(), None)
+                    if msg.cmd2 == msg.NakType.PRE_NAK:
+                        # This is a "Pre NAK in case database search takes
+                        # too long".  This happens when the device database is
+                        # large.  Just ignore it, add more wait time and wait.
+                        LOG.warning("%s Pre-NAK: %s, Message: %s",
+                                    self.db.addr, msg.nak_str(), msg)
+                        return Msg.CONTINUE
+                    else:
+                        LOG.error("%s db mod NAK: %s, Message: %s",
+                                  self.db.addr, msg.nak_str(), msg)
+                        self.on_done(False, "Device database update failed. " +
+                                     msg.nak_str(), None)
 
                 else:
                     LOG.error("%s db mod unexpected msg type: %s",

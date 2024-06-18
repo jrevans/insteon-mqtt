@@ -38,6 +38,9 @@ class FanLinc(Dimmer):
         # Initialize the dimmer.
         super().__init__(mqtt, device)
 
+        # This defines the default discovery_class for these devices
+        self.default_discovery_cls = "fan_linc"
+
         # Output fan state change reporting template.
         self.msg_fan_state = MsgTemplate(
             topic='insteon/{{address}}/fan/state',
@@ -67,7 +70,7 @@ class FanLinc(Dimmer):
           qos (int):  The default quality of service level to use.
         """
         # Load the dimmer configuration from the dimmer area, not the fanlinc
-        # area.
+        # area.  This will also load discovery items.
         super().load_config(config, qos)
 
         # Now load the fan control configuration.
@@ -84,6 +87,19 @@ class FanLinc(Dimmer):
         self.msg_fan_speed.load_config(data, 'fan_speed_set_topic',
                                        'fan_speed_set_payload', qos)
 
+        # Add our unique topics to the discovery topic map
+        topics = {}
+        var_data = self.base_template_data()
+        topics['fan_state_topic'] = self.msg_fan_state.render_topic(var_data)
+        topics['fan_on_off_topic'] = self.msg_fan_on_off.render_topic(var_data)
+        topics['fan_speed_topic'] = self.msg_fan_speed_state.render_topic(
+            var_data
+        )
+        topics['fan_speed_set_topic'] = self.msg_fan_speed.render_topic(
+            var_data
+        )
+        self.rendered_topic_map.update(topics)
+
     #-----------------------------------------------------------------------
     def subscribe(self, link, qos):
         """Subscribe to any MQTT topics the object needs.
@@ -99,7 +115,7 @@ class FanLinc(Dimmer):
         super().subscribe(link, qos)
 
         # Subscribe to the FanLinc topics.
-        data = self.template_data()
+        data = self.base_template_data()
 
         topic = self.msg_fan_on_off.render_topic(data)
         if topic:
@@ -149,11 +165,8 @@ class FanLinc(Dimmer):
         Returns:
           dict:  Returns a dict with the variables available for templating.
         """
-        data = {
-            "address" : self.device.addr.hex,
-            "name" : self.device.name if self.device.name
-                     else self.device.addr.hex,
-            }
+        # Set up the variables that can be used in the templates.
+        data = self.base_template_data()
 
         if level is not None:
             assert isinstance(level, Dev.FanLinc.Speed)
@@ -226,6 +239,6 @@ class FanLinc(Dimmer):
             reason = data.get("reason", "")
             self.device.fan_set(fan_speed, reason=reason)
         except:
-            LOG.exception("Invalid fan set speed command: %s", data)
+            LOG.error("Invalid fan set speed command: %s", data)
 
     #-----------------------------------------------------------------------

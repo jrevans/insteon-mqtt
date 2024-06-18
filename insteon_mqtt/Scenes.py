@@ -124,7 +124,7 @@ class SceneManager:
         controllers are merged.
 
         This is a companion to compress_responders and compress_n_way.  These
-        are seperate functions to that they can be called seperately using
+        are seperate functions so that they can be called seperately using
         Stacks.
 
         This function only processes the scenes in a single pass.  If it runs
@@ -164,7 +164,7 @@ class SceneManager:
         merged.
 
         This is a companion to compress_controllers and compress_n_way.
-        These are seperate functions to that they can be called seperately
+        These are seperate functions so that they can be called seperately
         using Stacks.
 
         This function only processes the scenes in a single pass.  If it runs
@@ -205,7 +205,7 @@ class SceneManager:
         definition..
 
         This is a companion to compress_responders and compress_controllers.
-        These are seperate functions to that they can be called seperately
+        These are seperate functions so that they can be called seperately
         using Stacks.
 
         This function only processes the scenes in a single pass.  If it runs
@@ -379,6 +379,24 @@ class SceneManager:
         Args:
           config (object):   Configuration object.
         """
+        # Get a list of the empty groups
+        empty_groups = self.modem.db.empty_groups()
+
+        # Remove groups that are already defined in the scenes file but not
+        # synced to the modem
+        for scene in self.entries:
+            for controller in scene.controllers:
+                if (controller.device is not None and
+                        controller.device.type() == "Modem" and
+                        controller.group > 0x01):
+                    try:
+                        position = empty_groups.index(controller.group)
+                        del empty_groups[position]
+                    except ValueError:
+                        # The group was not present
+                        pass
+
+        # Now assign groups
         updated = False
         for scene in self.entries:
             for controller in scene.controllers:
@@ -387,8 +405,14 @@ class SceneManager:
                         controller.group <= 0x01):
                     updated = True
 
-                    # Get and set the next available group id
-                    controller.group = self.modem.db.next_group()
+                    if len(empty_groups) >= 1:
+                        # Get and set the next available group id
+                        controller.group = empty_groups.pop(0)
+                    else:
+                        LOG.critical("Unable to add the modem as a controller "
+                                     "of a new scene. All 255 groups have "
+                                     "been used on your modem.")
+                        return
 
         # All done save the config file if necessary
         if updated:
@@ -522,7 +546,7 @@ class SceneEntry:
             if not found_ctrl:
                 # We know nothing about the controller so set to default values
                 # the link-data may be wrong, but it doesn't seem to matter
-                if entry.group > 0x01:
+                if entry.group != 0x01:
                     scene['controllers'].append({entry_addr: entry.group})
                 else:
                     scene['controllers'].append(entry_addr)
@@ -716,7 +740,7 @@ class SceneDevice:
                        "device that is neither defined in the config file nor "
                        "defined in the scenes file as an address: %s" %
                        self.label)
-                raise Exception(msg)
+                LOG.exception(msg)
 
         # Remove values from yaml_data if they are default values and make
         # pretty. Easiest way to do this is just to set things to themselves
@@ -731,16 +755,13 @@ class SceneDevice:
         primarily by the compress_* functions
         '''
         ret = False
-        self_group = self.group if self.group > 0x00 else 0x01
-        other_group = other.group if other.group > 0x00 else 0x01
-        if (self.addr == other.addr and self_group == other_group and
+        if (self.addr == other.addr and self.group == other.group and
                 self.link_data == other.link_data):
             ret = True
         return ret
 
     def __str__(self):
-        self_group = self.group if self.group > 0x00 else 0x01
-        subs = (self.addr, self_group, self.link_data)
+        subs = (self.addr, self.group, self.link_data)
         return 'Dev Addr: %s Group: %s Data1-3: %s' % subs
 
     def __hash__(self):
@@ -822,20 +843,20 @@ class SceneDevice:
         Args:
           value:    (int)The group value
         """
-        if self.style == 0 and value > 0x01:
+        if self.style == 0 and value != 0x01:
             if ('group' not in self._yaml_data[self.label] or
                     self._yaml_data[self.label]['group'] != value):
                 self._yaml_data[self.label]['group'] = value
-        if self.style == 1 and value > 0x01:
+        if self.style == 1 and value != 0x01:
             self._yaml_data[self.label] = value
-        if self.style == 2 and value > 0x01:
+        if self.style == 2 and value != 0x01:
             self._yaml_data = {self.label: value}
 
-        # Remove group entry in yaml_data if default value of 0x00 or 0x01
+        # Remove group entry in yaml_data if default value of 0x01
         if (self.style == 0 and 'group' in self._yaml_data[self.label] and
-                value <= 0x01):
+                value == 0x01):
             del self._yaml_data[self.label]['group']
-        elif self.style == 1 and value <= 0x01:
+        elif self.style == 1 and value == 0x01:
             self._yaml_data = self.label
         self.update_device()
 
@@ -891,7 +912,7 @@ class SceneDevice:
                 # Group is a bit special and gets added to link_data
                 # a few responders (kpl) need to know group to set data_3
                 link_dict = self._yaml_data[self.label].copy()
-                if self.group > 0x01:
+                if self.group != 0x01:
                     link_dict['group'] = self.group
                 # Convert data values from human readable form
                 pretty_data = self.device.link_data_from_pretty(

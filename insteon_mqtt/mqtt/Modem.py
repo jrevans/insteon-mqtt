@@ -3,14 +3,15 @@
 # MQTT PLM modem device
 #
 #===========================================================================
+import json
+import re
 from .. import log
+from . import topic
 from .MsgTemplate import MsgTemplate
-from . import util
-
 LOG = log.get_logger()
 
 
-class Modem:
+class Modem(topic.SceneTopic, topic.DiscoveryTopic):
     """MQTT interface to an Insteon power line modem (PLM).
 
     This class connects to an insteon_mqtt.Modem object and allows input MQTT
@@ -24,13 +25,15 @@ class Modem:
           mqtt (mqtt.Mqtt):  The MQTT main interface.
           modem (Modem):  The Insteon modem object to link to.
         """
-        self.mqtt = mqtt
-        self.device = modem
+        super().__init__(mqtt, modem, scene_topic='insteon/modem/scene',
+                         scene_payload='{ "cmd" : "{{json.cmd.lower()}}",'
+                                       '"group" : {{json.group}} }')
 
-        # Input scene on/off command template.
-        self.msg_scene = MsgTemplate(
-            topic='insteon/modem/scene',
-            payload='{{value}}')
+        # This defines the default discovery_class for these devices
+        self.default_discovery_cls = "modem"
+
+        # Set the groups for discovery topic generation
+        # self.extra_topic_nums = range(2, 255)
 
     #-----------------------------------------------------------------------
     def load_config(self, config, qos=None):
@@ -45,7 +48,73 @@ class Modem:
         if not data:
             return
 
-        self.msg_scene.load_config(data, 'scene_topic', 'scene_payload', qos)
+        self.load_scene_data(data, qos)
+
+        # Load Discovery Data, Modem uses a slightly different process than
+        # all other devices.  It only uses a single template, but needs to
+        # pass a variable in the topic
+        if not self.mqtt.discovery_enabled:
+            return
+
+        class_config = config.get(self.default_discovery_cls, None)
+        if class_config is None:
+            LOG.error("%s - Unable to find discovery class %s",
+                      self.device.label, self.default_discovery_cls)
+            return
+
+        # Loop all of the discovery entities and append them to
+        # self.rendered_topic_map
+        entities = class_config.get('discovery_entities', None)
+        if entities is None or not isinstance(entities, dict):
+            LOG.error("%s - No discovery_entities defined, or not a dict %s",
+                      self.device.label, entities)
+            return
+
+        if len(entities) > 1:
+            LOG.warning("%s - Modem only uses the first discovery_entity, "
+                        "ignoring the rest %s", self.device.label, entities)
+
+        entity = list(entities.values())[0]
+        component = entity.get('component', None)
+        if component is None:
+            LOG.error("%s - No component specified in discovery entity %s",
+                      self.device.label, entity)
+            return
+
+        payload = entity.get('config', None)
+        if payload is None:
+            LOG.error("%s - No config specified in discovery entity %s",
+                      self.device.label, entity)
+            return
+
+        payload = json.dumps(payload, indent=2)
+        # replace reference to device_info as string
+        # with reference as object (remove quotes)
+        payload = re.sub(r'"{{\s*device_info\s*}}"', '{{device_info}}',
+                         payload)
+
+        # Get Unique ID from payload to use in topic
+        unique_id = self._get_unique_id(payload)
+        if unique_id is None:
+            LOG.error("%s - Error getting unique_id, skipping entry",
+                      self.device.label)
+            return
+
+        # HA's implementation of discovery only allows a very limited
+        # range of characters in the node_id and object_id fields.
+        # See line #30 of /homeassistant/components/mqtt/discovery.py
+        # Replace any not-allowed character with underscore
+        topic_base = self.mqtt.discovery_topic_base
+        address_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', self.device.addr.hex)
+        unique_id_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', unique_id)
+        default_topic = "%s/%s/%s/%s/config" % (topic_base,
+                                                component,
+                                                address_safe,
+                                                unique_id_safe + "_{{scene}}")
+        self.disc_templates.append(MsgTemplate(topic=default_topic,
+                                               payload=payload,
+                                               qos=qos,
+                                               retain=False))
 
     #-----------------------------------------------------------------------
     def subscribe(self, link, qos):
@@ -58,8 +127,7 @@ class Modem:
           link (network.Mqtt):  The MQTT network client to use.
           qos (int):  The quality of service to use.
         """
-        topic = self.msg_scene.render_topic(self.template_data())
-        link.subscribe(topic, qos, self._input_scene)
+        self.scene_subscribe(link, qos)
 
     #-----------------------------------------------------------------------
     def unsubscribe(self, link):
@@ -68,49 +136,42 @@ class Modem:
         Args:
           link (network.Mqtt):  The MQTT network client to use.
         """
-        topic = self.msg_scene.render_topic(self.template_data())
-        link.unsubscribe(topic)
+        self.scene_unsubscribe(link)
 
     #-----------------------------------------------------------------------
-    def template_data(self):
-        """Create the Jinja templating data variables for messages.
+    def publish_discovery(self, **kwargs):
+        """This Hijacks the method from DiscoveryTopic
 
-        Returns:
-          dict:  Returns a dict with the variables available for templating.
-        """
-        data = {
-            "address" : self.device.addr.hex,
-            "name" : self.device.name,
-            }
-        return data
+        This is necessary because the Modem is a singular device that requires
+        a little different handling to publish the available scenes.
 
-    #-----------------------------------------------------------------------
-    def _input_scene(self, client, data, message):
-        """Handle an input simulate scene MQTT message.
+        This is triggered from the MQTT handler.
 
-        This is called when we receive a message on the scene change MQTT
-        topic subscription.  Parse the message and pass the command to the
-        Insteon device.
+        No kwargs are currently sent from the MQTT handler, it is a little
+        hard to imagine how any such arguments could be provided but left here
+        for potential use.
 
         Args:
-          client (paho.Client):  The paho mqtt client (self.link).
-          data:  Optional user data (unused).
-          message:  MQTT message - has attrs: topic, payload, qos, retain.
+          kwargs (dict): The arguments to pass to discovery_template_data
         """
-        LOG.debug("Modem message %s %s", message.topic, message.payload)
+        LOG.info("MQTT discovery %s on: %s", self.device.label, kwargs)
 
-        # Parse the input MQTT message.
-        data = self.msg_scene.to_json(message.payload)
-        LOG.info("Modem input command: %s", data)
+        data = self.discovery_template_data(**kwargs)
 
-        try:
-            is_on = util.parse_on_off(data, have_mode=False)
-            group = int(data.get('group', None)) if 'group' in data else None
-            name = str(data.get('name', None)) if 'name' in data else None
-
-            # Tell the device to trigger the scene command.
-            self.device.scene(is_on, group=group, name=name)
-        except:
-            LOG.exception("Invalid modem command: %s", data)
+        for scene in self.device.db.groups:
+            if scene < 2:
+                # Don't publish scenes 0/1, they are not real scenes
+                continue
+            # Try and load the scene name if it exists
+            scene_map = self.device.scene_map
+            try:
+                scene_index = list(scene_map.values()).index(scene)
+                data['scene_name'] = list(scene_map.keys())[scene_index]
+            except ValueError:
+                # scene does not have a name
+                data['scene_name'] = ""
+            data['scene'] = scene
+            self.disc_templates[0].publish(self.mqtt, data.copy(),
+                                           retain=False)
 
     #-----------------------------------------------------------------------

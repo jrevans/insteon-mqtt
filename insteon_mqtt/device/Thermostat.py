@@ -4,7 +4,7 @@
 #
 #===========================================================================
 import enum
-from .Base import Base
+from .base import Base
 from ..CommandSeq import CommandSeq
 from .. import log
 from .. import message as Msg
@@ -85,7 +85,7 @@ class Thermostat(Base):
     FARENHEIT = 0
     CELSIUS = 1
 
-    def __init__(self, protocol, modem, address, name=None):
+    def __init__(self, protocol, modem, address, name=None, config_extra=None):
         """Constructor
 
         Args:
@@ -95,11 +95,10 @@ class Thermostat(Base):
           modem:       (Modem) The Insteon modem used to find other devices.
           address:     (Address) The address of the device.
           name:        (str) Nice alias name to use for the device.
-          dimmer:      (bool) True if the device supports dimming - False if
-                       it's a regular switch.
+          config_extra (dict) Extra configuration settings
         """
         # Set default values to attributes, may be overwritten by saved values
-        super().__init__(protocol, modem, address, name)
+        super().__init__(protocol, modem, address, name, config_extra)
 
         self.cmd_map.update({
             'get_status' : self.get_status
@@ -118,6 +117,17 @@ class Thermostat(Base):
         # Add handler for processing direct Messages from the thermostat.
         # This handler stays active for all time - it never ends.
         protocol.add_handler(handler.ThermostatCmd(self))
+
+        # Defined controller groups and the handlers for them
+        self.group_map = {
+            self.Groups.COOLING.value: self.handle_message,
+            self.Groups.HEATING.value: self.handle_message,
+            self.Groups.HUMID_HIGH.value: self.handle_message,
+            self.Groups.HUMID_LOW.value: self.handle_message,
+            self.Groups.BROADCAST.value: self.handle_message,
+            self.Groups.COOLING.value: self.handle_message,
+            self.Groups.COOLING.value: self.handle_message
+            }
 
     @property
     def units(self):
@@ -145,17 +155,10 @@ class Thermostat(Base):
 
     #-----------------------------------------------------------------------
     def pair(self, on_done=None):
-        """Pair the device with the modem.
+        """Wrapper for Base.Pair().
 
-        This only needs to be called one time.  It will set the device as a
-        controller and the modem as a responder so the modem will see group
-        broadcasts and report them to us.
-
-        This will also run the enable_broadcast command to ensure that
-        the direct 'broadcast' messages are sent by the device.
-
-        The device must already be a responder to the modem (push set on the
-        modem, then set on the device) so we can update it's database.
+        This wraps the Base.Pair() function so that we can call the enable
+        broadcast flag when pairing is complete.
 
         Args:
           on_done: Finished callback.  This is called when the command has
@@ -163,84 +166,40 @@ class Thermostat(Base):
         """
         LOG.info("Thermostat %s pairing", self.addr)
 
-        # Build a sequence of calls to the do the pairing.  This insures each
-        # call finishes and works before calling the next one.  We have to do
-        # this for device db manipulation because we need to know the memory
-        # layout on the device before making changes.
-        seq = CommandSeq(self.protocol, "Thermostat paired", on_done)
+        # Build a sequence of calls to the do the pairing.
+        seq = CommandSeq(self, "Thermostat paired", on_done, name="DevPair")
 
-        # Start with a refresh command - since we're changing the db, it must
-        # be up to date or bad things will happen.
-        seq.add(self.refresh)
-
-        # Add the device as a responder to the modem on group 1.  This is
-        # probably already there - and maybe needs to be there before we can
-        # even issue any commands but this check insures that the link is
-        # present on the device and the modem.
-        seq.add(self.db_add_resp_of, 0x01, self.modem.addr, 0x01,
-                refresh=False)
-
-        # Now add the device as the controller of the modem for all the alert
-        # types.
-        for group_map in Thermostat.Groups:
-            group = group_map.value
-            seq.add(self.db_add_ctrl_of, group, self.modem.addr, group,
-                    refresh=False)
+        # Do normal pair first.
+        seq.add(super().pair)
 
         # Ask the device to enable the broadcast messages, otherwise the
         # direct messages such as temp changes are not sent to the modem
         seq.add(self.enable_broadcast)
 
-        # Finally start the sequence running.  This will return so the
-        # network event loop can process everything and the on_done callbacks
-        # will chain everything together.
+        # Run the sequence
         seq.run()
 
     #-----------------------------------------------------------------------
-    def refresh(self, force=False, on_done=None):
-        """Refresh the current device state and database if needed.
+    def addRefreshData(self, seq, force=False):
+        """Add commands to refresh any internal data required.
 
-        This sends a ping to the device.  The reply has the current device
-        state (on/off, level, etc) and the current db delta value which is
-        checked against the current db value.  If the current db is out of
-        date, it will trigger a download of the database.
+        The base class uses this update the device catalog ID's and firmware
+        if we don't know what they are.
 
-        This will send out an updated signal for the current device status
-        whenever possible.
+        This is split out of refresh() so derived classes that override
+        refresh can also get this information.
 
-        In addition, this also runs the 'get_status' command as well, which
-        asks the thermostat for the current state of its attributes as well
-        the current units selected on the device.  If you are seeing errors
-        in temperatures that look like C and F are reversed, running a refresh
-        may fix the issue.
+        The base refresh only checks the DB value for a thermostat, all other
+        states are determined by get_status()
 
         Args:
+          seq (CommandSeq): The command sequence to add the command to.
           force (bool):  If true, will force a refresh of the device database
                 even if the delta value matches as well as a re-query of the
                 device model information even if it is already known.
-          on_done: Finished callback.  This is called when the command has
-                   completed.  Signature is: on_done(success, msg, data)
         """
-        LOG.info("Device %s cmd: fan status refresh", self.addr)
-
-        seq = CommandSeq(self.protocol, "Refresh complete", on_done)
-
-        # Send a 0x19 0x03 command to get the fan speed level.  This sends a
-        # refresh ping which will respond w/ the fan level and current
-        # database delta field.  Pass skip_db here - we'll let the dimmer
-        # refresh handler above take care of getting the database updated.
-        # Otherwise this handler and the one created in the dimmer refresh
-        # would download the database twice.
-        msg = Msg.OutStandard.direct(self.addr, 0x19, 0x03)
-        msg_handler = handler.DeviceRefresh(self, self.handle_refresh,
-                                            force=False, num_retry=3,
-                                            skip_db=True)
-        seq.add_msg(msg, msg_handler)
-
-        # If we get the FAN state correctly, then have the dimmer also get
-        # it's state and update the database if necessary.
         seq.add(self.get_status)
-        seq.run()
+        super().addRefreshData(seq, force=force)
 
     #-----------------------------------------------------------------------
     def get_status(self, on_done=None):
@@ -435,36 +394,12 @@ class Thermostat(Base):
         """
         msg = Msg.OutExtended.direct(self.addr, 0x2e, 0x00,
                                      bytes([0x00] + [0x08] + [0x00] * 12))
-        msg_handler = handler.StandardCmd(msg, self.handle_generic_ack,
-                                          on_done, num_retry=3)
+        callback = self.generic_ack_callback("Thermostate broadcast enabled")
+        msg_handler = handler.StandardCmd(msg, callback, on_done, num_retry=3)
         self.send(msg, msg_handler)
 
     #-----------------------------------------------------------------------
-    def handle_generic_ack(self, msg, on_done=None):
-        """Handles generic ack responses where there is nothing to do.
-
-        Generally the reason there is nothing to do is that the thermostat
-        will send a subsequent direct message through which we can update
-        the necessary state
-
-        Args:
-          msg (InpStandard): Direct ACK message from the device.
-          on_done: Finished callback.  This is called when the command has
-                   completed.  Signature is: on_done(success, msg, data)
-        """
-        on_done = util.make_callback(on_done)
-
-        if msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-            LOG.error("%s NAK: %s, Message: %s", self.db.addr, msg.nak_str(),
-                      msg)
-            on_done(False, "Thermostat command NAK. " + msg.nak_str(), None)
-
-        else:
-            LOG.debug("Thermostat %s generic ack recevied", self.addr)
-            on_done(True, "Thermostat generic ack recevied", None)
-
-    #-----------------------------------------------------------------------
-    def handle_broadcast(self, msg):
+    def handle_message(self, msg):
         """Handle broadcast messages from this device.
 
         Group broadcast messages are sent for Cooling, Heating, humidifying
@@ -476,16 +411,11 @@ class Thermostat(Base):
         Args:
           msg (InpStandard): Broadcast message from the device.
         """
-        # 0x11 is ON 0x13 is OFF.
-        if msg.cmd1 in [0x11, 0x13]:
+        if msg.cmd1 in [Msg.CmdType.ON, Msg.CmdType.OFF]:
             LOG.info("Thermostat %s broadcast %s grp: %s", self.addr, msg.cmd1,
                      msg.group)
 
-            try:
-                condition = Thermostat.Groups(msg.group)
-            except ValueError:
-                LOG.exception("Unknown thermostat group %s.", msg.group)
-                return
+            condition = Thermostat.Groups(msg.group)
 
             LOG.info("Thermostat %s signaling condition %s", self.addr,
                      condition)
@@ -504,7 +434,7 @@ class Thermostat(Base):
 
         # As long as there is no errors (which return above), call
         # handle_broadcast for any device that we're the controller of.
-        super().handle_broadcast(msg)
+        self.update_linked_devices(msg)
 
     #-----------------------------------------------------------------------
     def mode_command(self, mode):
@@ -538,13 +468,7 @@ class Thermostat(Base):
         """
         on_done = util.make_callback(on_done)
 
-        if msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-            LOG.error("%s mode command NAK: %s, Message: %s", self.db.addr,
-                      msg.nak_str(), msg)
-            on_done(False, "Thermostat mode command NAK. " + msg.nak_str(),
-                    None)
-
-        elif msg.cmd1 == 0x6b:
+        if msg.cmd1 == 0x6b:
             self.signal_mode_change.emit(self,
                                          Thermostat.ModeCommands(msg.cmd2))
             on_done(True, "Thermostat recevied mode command", None)
@@ -586,13 +510,7 @@ class Thermostat(Base):
         """
         on_done = util.make_callback(on_done)
 
-        if msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-            LOG.error("%s fan command NAK: %s, Message: %s", self.db.addr,
-                      msg.nak_str(), msg)
-            on_done(False, "Thermostat fan command NAK. " + msg.nak_str(),
-                    None)
-
-        elif msg.cmd1 == 0x6b:
+        if msg.cmd1 == 0x6b:
             self.signal_fan_mode_change.emit(self,
                                              Thermostat.FanCommands(msg.cmd2))
             on_done(True, "Thermostat recevied fan mode command", None)

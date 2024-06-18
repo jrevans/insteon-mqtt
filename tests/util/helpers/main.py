@@ -16,10 +16,32 @@ class MockModem:
         self.addr = IM.Address(0x20, 0x30, 0x40)
         self.save_path = str(save_path)
         self.scenes = []
+        self.devices = {}
+        self.device_names = {}
+        self.timed_call = MockTimedCall()
 
-    def scene(self, is_on, group, num_retry=3, on_done=None):
-        self.scenes.append((is_on, group))
+    def add(self, device):
+        self.devices[device.addr.id] = device
+        if device.name:
+            self.device_names[device.name] = device
 
+    def find(self, addr):
+        if isinstance(addr, str):
+            device = self.device_names.get(addr, None)
+        else:
+            device = self.devices.get(addr.id, None)
+        return device
+
+    def remove(self, device):
+        self.devices.pop(device.addr.id, None)
+        if device.name:
+            self.device_names.pop(device.name, None)
+
+    def scene(self, is_on, group, num_retry=3, on_done=None, reason=""):
+        self.scenes.append((is_on, group, reason))
+
+    def clear_db_config(self):
+        pass
 
 #===========================================================================
 class MockProtocol:
@@ -27,7 +49,9 @@ class MockProtocol:
     """
     def __init__(self):
         self.signal_received = IM.Signal()
+        self.signal_msg_finished = IM.Signal()
         self.sent = []
+        self.addr_in_queue = False
 
     def clear(self):
         self.sent = []
@@ -38,5 +62,45 @@ class MockProtocol:
     def add_handler(self, handler):
         pass
 
+    def set_wait_time(self, seconds):
+        pass
+
+    def is_addr_in_write_queue(self, *args):
+        return self.addr_in_queue
+
+#===========================================================================
+class MockDevice:
+    """Mock insteon_mqtt/Device class
+    """
+    #-----------------------------------------------------------------------
+    def __init__(self, protocol, modem, address, name=None):
+        self.protocol = protocol
+        self.modem = modem
+        self.addr = IM.Address(address)
+        self.name = name
+        self.name_user_case = name
+
+    def send(self, msg, msg_handler, high_priority=False, after=None):
+        self.protocol.send(msg, msg_handler, high_priority, after)
+
+#===========================================================================
+class MockStack:
+    """Mock insteon_mqtt/network/Stack class
+    """
+    def __init__(self):
+        pass
+
+#===========================================================================
+class MockTimedCall:
+    """Mock insteon_mqtt/network/TimedCall class
+    """
+    def __init__(self):
+        pass
+
+    def add(self, *args, **kwargs):
+        pass
+
+    def remove(self, *args, **kwargs):
+        pass
 
 #===========================================================================

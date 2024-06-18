@@ -4,6 +4,7 @@
 #
 # pylint: disable=redefined-outer-name
 #===========================================================================
+import time
 import pytest
 import insteon_mqtt as IM
 import helpers as H
@@ -62,28 +63,34 @@ class Test_Switch:
     def test_template(self, setup):
         mdev, addr, name = setup.getAll(['mdev', 'addr', 'name'])
 
-        data = mdev.template_data()
+        data = mdev.base_template_data()
         right = {"address" : addr.hex, "name" : name}
+        assert data['timestamp'] - time.time() <= 1
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(is_on=True, mode=IM.on_off.Mode.FAST,
-                                  manual=IM.on_off.Manual.STOP,
-                                  reason="something")
+        data = mdev.state_template_data(is_on=True, mode=IM.on_off.Mode.FAST,
+                                        manual=IM.on_off.Manual.STOP,
+                                        reason="something")
         right = {"address" : addr.hex, "name" : name,
                  "on" : 1, "on_str" : "on", "reason" : "something",
                  "mode" : "fast", "fast" : 1, "instant" : 0,
                  "manual_str" : "stop", "manual" : 0, "manual_openhab" : 1}
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(is_on=False)
+        data = mdev.state_template_data(is_on=False)
         right = {"address" : addr.hex, "name" : name, "reason" : "",
                  "on" : 0, "on_str" : "off",
                  "mode" : "normal", "fast" : 0, "instant" : 0}
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(manual=IM.on_off.Manual.UP, reason="foo")
+        data = mdev.state_template_data(manual=IM.on_off.Manual.UP,
+                                        reason="foo")
         right = {"address" : addr.hex, "name" : name, "reason" : "foo",
                  "manual_str" : "up", "manual" : 1, "manual_openhab" : 2}
+        del data['timestamp']
         assert data == right
 
     #-----------------------------------------------------------------------
@@ -95,8 +102,8 @@ class Test_Switch:
         mdev.load_config({})
 
         # Send an on/off signal
-        dev.signal_on_off.emit(dev, True)
-        dev.signal_on_off.emit(dev, False)
+        dev.signal_state.emit(dev, is_on=True)
+        dev.signal_state.emit(dev, is_on=False)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic='%s/state' % topic, payload='on', qos=0, retain=True)
@@ -105,9 +112,24 @@ class Test_Switch:
         link.client.clear()
 
         # Send a manual mode signal - should do nothing w/ the default config.
-        dev.signal_manual.emit(dev, IM.on_off.Manual.DOWN)
-        dev.signal_manual.emit(dev, IM.on_off.Manual.STOP)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.DOWN)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.STOP)
         assert len(link.client.pub) == 0
+
+    #-----------------------------------------------------------------------
+    def test_discovery(self, setup):
+        mdev, dev, link = setup.getAll(['mdev', 'dev', 'link'])
+        topic = "insteon/%s" % setup.addr.hex
+
+        mdev.load_config({"switch": {"junk": "junk"}})
+        assert mdev.default_discovery_cls == "switch"
+        assert mdev.rendered_topic_map == {
+            'manual_state_topic': None,
+            'on_off_topic': 'insteon/01.02.03/set',
+            'scene_topic': 'insteon/01.02.03/scene',
+            'state_topic': 'insteon/01.02.03/state'
+        }
+        assert len(mdev.extra_topic_nums) == 0
 
     #-----------------------------------------------------------------------
     def test_config(self, setup):
@@ -125,8 +147,8 @@ class Test_Switch:
         mtopic = "bar/%s" % setup.addr.hex
 
         # Send an on/off signal
-        dev.signal_on_off.emit(dev, True)
-        dev.signal_on_off.emit(dev, False)
+        dev.signal_state.emit(dev, is_on=True)
+        dev.signal_state.emit(dev, is_on=False)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic=stopic, payload='1 ON', qos=qos, retain=True)
@@ -135,8 +157,8 @@ class Test_Switch:
         link.client.clear()
 
         # Send a manual signal
-        dev.signal_manual.emit(dev, IM.on_off.Manual.DOWN)
-        dev.signal_manual.emit(dev, IM.on_off.Manual.STOP)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.DOWN)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.STOP)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic=mtopic, payload='-1 DOWN', qos=qos, retain=False)
@@ -245,7 +267,7 @@ class Test_Switch:
 
     #-----------------------------------------------------------------------
     def test_input_scene_reason(self, setup):
-        mdev, link, proto = setup.getAll(['mdev', 'link', 'proto'])
+        mdev, link, proto, dev = setup.getAll(['mdev', 'link', 'proto', 'dev'])
 
         qos = 2
         config = {'switch' : {
@@ -263,8 +285,10 @@ class Test_Switch:
 
         assert proto.sent[0].msg.cmd1 == 0x30
         assert proto.sent[0].msg.data[3] == 0x13
-        cb = proto.sent[0].handler.callback
-        assert cb.keywords == {"reason" : "a b c"}
+        cb = proto.sent[0].handler.on_done
+        # Signal a success
+        cb(True, "Done", None)
+        assert dev.broadcast_reason == "a b c"
         proto.clear()
 
         payload = b'{ "on" : "ON", "reason" : "zyx" }'
@@ -273,8 +297,10 @@ class Test_Switch:
 
         assert proto.sent[0].msg.cmd1 == 0x30
         assert proto.sent[0].msg.data[3] == 0x11
-        cb = proto.sent[0].handler.callback
-        assert cb.keywords == {"reason" : "zyx"}
+        cb = proto.sent[0].handler.on_done
+        # Signal a success
+        cb(True, "Done", None)
+        assert dev.broadcast_reason == "zyx"
         proto.clear()
 
 

@@ -16,8 +16,9 @@ class BroadcastCmdResponse(Base):
     This class handles responses from the device where the device sends an
     ACK but a subsequent broadcast message is sent with the requested payload.
 
-    The handler watches for the proper standard length ACK, returns
-    a continue and then waits for the broadcast payload.
+    The handler watches for the proper PLM ACK, followed by a standard length
+    ACK from the device, and then only after these two prior ACKs have been
+    received, will it call the callback with a broadcast message received.
     """
     def __init__(self, msg, callback, on_done=None, num_retry=3):
         """Constructor
@@ -37,6 +38,7 @@ class BroadcastCmdResponse(Base):
         self.addr = msg.to_addr
         self.cmd = msg.cmd1
         self.callback = callback
+        self._device_ACK = False
 
     #-----------------------------------------------------------------------
     def msg_received(self, protocol, msg):
@@ -54,15 +56,19 @@ class BroadcastCmdResponse(Base):
           Msg.CONTINUE if we handled the message and expect more.
           Msg.FINISHED if we handled the message and are done.
         """
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
         # Probably an echo back of our sent message.
         if isinstance(msg, Msg.OutStandard):
             # If the message is the echo back of our message, then continue
             # waiting for a reply.
             if msg.to_addr == self.addr and msg.cmd1 == self.cmd:
                 if not msg.is_ack:
-                    LOG.error("%s NAK response", self.addr)
-
-                LOG.debug("%s got msg ACK", self.addr)
+                    LOG.warning("%s PLM NAK response", self.addr)
+                else:
+                    LOG.debug("%s got PLM ACK", self.addr)
+                    self._PLM_ACK = True
                 return Msg.CONTINUE
 
             # Message didn't match the expected addr/cmd.
@@ -71,7 +77,7 @@ class BroadcastCmdResponse(Base):
 
         # Probably an ACK/NAK from the device for our get command.
         elif (isinstance(msg, Msg.InpStandard) and
-              msg.flags.type != Msg.Flags.Type.BROADCAST):
+              msg.flags.type != Msg.Flags.Type.BROADCAST and self._PLM_ACK):
             # Filter by address and command.
             if msg.from_addr != self.addr or msg.cmd1 != self.cmd:
                 return Msg.UNKNOWN
@@ -79,20 +85,31 @@ class BroadcastCmdResponse(Base):
             if msg.flags.type == Msg.Flags.Type.DIRECT_ACK:
                 LOG.info("%s device ACK response, waiting for broadcast "
                          "payload", msg.from_addr)
+                self._device_ACK = True
                 return Msg.CONTINUE
 
             elif msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-                LOG.error("%s device NAK error: %s", msg.from_addr, msg)
-                self.on_done(False, "Device command NAK", None)
-                return Msg.FINISHED
+                if msg.cmd2 == msg.NakType.PRE_NAK:
+                    # This is a "Pre NAK in case database search takes
+                    # too long".  This happens when the device database is
+                    # large.  Just ignore it, add more wait time and wait.
+                    LOG.warning("%s Pre-NAK: %s, Message: %s", msg.from_addr,
+                                msg.nak_str(), msg)
+                    return Msg.CONTINUE
+                else:
+                    LOG.error("%s device NAK error: %s", msg.from_addr, msg)
+                    self.on_done(False, "Device command NAK", None)
+                    return Msg.FINISHED
 
             else:
                 LOG.warning("%s device unexpected msg: %s", msg.from_addr, msg)
                 return Msg.UNKNOWN
 
-        # Process the payload reply.
+        # Process the broadcast payload reply only if PLM and device ACKs
+        # received previously
         elif (isinstance(msg, Msg.InpStandard) and
-              msg.flags.type == Msg.Flags.Type.BROADCAST):
+              msg.flags.type == Msg.Flags.Type.BROADCAST and self._PLM_ACK and
+              self._device_ACK):
             # Filter by address and command.
             if msg.from_addr == self.addr:
                 # Run the callback - it's up to the callback to check if this

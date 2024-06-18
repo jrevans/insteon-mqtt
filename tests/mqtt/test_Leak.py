@@ -57,22 +57,26 @@ class Test_Leak:
 
         data = mdev.template_data()
         right = {"address" : addr.hex, "name" : name}
+        assert data['timestamp'] - time.time() <= 1
+        del data['timestamp']
         assert data == right
 
         t0 = time.time()
-        data = mdev.template_data(is_wet=True, is_heartbeat=True)
+        data = mdev.template_data(is_heartbeat=True)
         right = {"address" : addr.hex, "name" : name,
-                 "is_wet" : 1, "is_wet_str" : "on", "state" : "wet",
-                 "is_dry" : 0, "is_dry_str" : "off",
                  "is_heartbeat" : 1, "is_heartbeat_str" : "on"}
         hb = data.pop('heartbeat_time')
+        del data['timestamp']
         assert data == right
         pytest.approx(t0, hb, 5)
 
-        data = mdev.template_data(is_wet=False)
+        data = mdev.state_template_data(button=2, is_on=False)
         right = {"address" : addr.hex, "name" : name,
                  "is_wet" : 0, "is_wet_str" : "off", "state" : "dry",
-                 "is_dry" : 1, "is_dry_str" : "on"}
+                 "is_dry" : 1, "is_dry_str" : "on", "button": 2,
+                 "fast": 0, "instant": 0, "mode": 'normal', "on": 0,
+                 "on_str": 'off', "reason": ''}
+        del data['timestamp']
         assert data == right
 
     #-----------------------------------------------------------------------
@@ -85,13 +89,13 @@ class Test_Leak:
         mdev.load_config({})
 
         # Send an on/off signal
-        dev.signal_wet.emit(dev, True)
-        dev.signal_wet.emit(dev, False)
+        dev.signal_state.emit(dev, button=2, is_on=True)
+        dev.signal_state.emit(dev, button=2, is_on=False)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
-            topic='%s/wet' % topic, payload='on', qos=0, retain=True)
+            topic='%s/state' % topic, payload='on', qos=0, retain=True)
         assert link.client.pub[1] == dict(
-            topic='%s/wet' % topic, payload='off', qos=0, retain=True)
+            topic='%s/state' % topic, payload='off', qos=0, retain=True)
 
         link.client.clear()
 
@@ -110,6 +114,49 @@ class Test_Leak:
         pytest.approx(t0, hb, 5)
 
     #-----------------------------------------------------------------------
+    def test_discovery(self, setup):
+        mdev = setup.get('mdev')
+
+        # Test leak defined but battery not
+        mdev.load_config({"leak": {'wet_dry_topic': 'insteon/{{address}}/wet'}})
+        assert mdev.default_discovery_cls == "leak"
+        assert mdev.rendered_topic_map == {
+            'wet_dry_topic': 'insteon/01.02.03/wet'
+        }
+        assert len(mdev.extra_topic_nums) == 0
+
+        # Test both defined
+        mdev.load_config({"leak": {'wet_dry_topic': 'insteon/{{address}}/wet'},
+                          "battery_sensor" :
+                              {'state_topic': 'insteon/{{address}}/state'}})
+        assert mdev.default_discovery_cls == "leak"
+        assert mdev.rendered_topic_map == {
+            'wet_dry_topic': 'insteon/01.02.03/wet',
+            'heartbeat_topic': 'insteon/01.02.03/heartbeat',
+            'low_battery_topic': 'insteon/01.02.03/battery'
+        }
+        assert len(mdev.extra_topic_nums) == 0
+
+
+    #-----------------------------------------------------------------------
+    def test_refresh_data(self, setup):
+        # handle refresh will pass the level and not an is_on
+        mdev, dev, link = setup.getAll(['mdev', 'dev', 'link'])
+
+        topic = "insteon/%s" % setup.addr.hex
+
+        # Should do nothing
+        mdev.load_config({})
+
+        # Send an on/off signal I actually think this would be level=0xff
+        dev.signal_state.emit(dev, button=2, level=0x11, reason='refresh')
+        assert len(link.client.pub) == 1
+        assert link.client.pub[0] == dict(
+            topic='%s/state' % topic, payload='on', qos=0, retain=True)
+
+        link.client.clear()
+
+    #-----------------------------------------------------------------------
     def test_config(self, setup):
         mdev, dev, link = setup.getAll(['mdev', 'dev', 'link'])
 
@@ -125,8 +172,8 @@ class Test_Leak:
         htopic = "bar/%s" % setup.addr.hex
 
         # Send an on/off signal
-        dev.signal_wet.emit(dev, True)
-        dev.signal_wet.emit(dev, False)
+        dev.signal_state.emit(dev, button=2, is_on=True)
+        dev.signal_state.emit(dev, button=1, is_on=True)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic=stopic, payload='1 ON', qos=qos, retain=True)

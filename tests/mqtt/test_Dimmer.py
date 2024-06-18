@@ -4,6 +4,7 @@
 #
 # pylint: disable=redefined-outer-name
 #===========================================================================
+import time
 import pytest
 import insteon_mqtt as IM
 import helpers as H
@@ -66,30 +67,36 @@ class Test_Dimmer:
     def test_template(self, setup):
         mdev, addr, name = setup.getAll(['mdev', 'addr', 'name'])
 
-        data = mdev.template_data()
+        data = mdev.base_template_data()
         right = {"address" : addr.hex, "name" : name}
+        assert data['timestamp'] - time.time() <= 1
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(level=0x55, mode=IM.on_off.Mode.FAST,
-                                  manual=IM.on_off.Manual.STOP,
-                                  reason="something")
+        data = mdev.state_template_data(level=0x55, mode=IM.on_off.Mode.FAST,
+                                        manual=IM.on_off.Manual.STOP,
+                                        reason="something")
         right = {"address" : addr.hex, "name" : name,
                  "on" : 1, "on_str" : "on", "reason" : "something",
                  "level_255" : 85, "level_100" : 33,
                  "mode" : "fast", "fast" : 1, "instant" : 0,
                  "manual_str" : "stop", "manual" : 0, "manual_openhab" : 1}
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(level=0x00)
+        data = mdev.state_template_data(level=0x00)
         right = {"address" : addr.hex, "name" : name,
                  "on" : 0, "on_str" : "off", "reason" : "",
                  "level_255" : 0, "level_100" : 0,
                  "mode" : "normal", "fast" : 0, "instant" : 0}
+        del data['timestamp']
         assert data == right
 
-        data = mdev.template_data(manual=IM.on_off.Manual.UP, reason="foo")
+        data = mdev.state_template_data(manual=IM.on_off.Manual.UP,
+                                        reason="foo")
         right = {"address" : addr.hex, "name" : name, "reason" : "foo",
                  "manual_str" : "up", "manual" : 1, "manual_openhab" : 2}
+        del data['timestamp']
         assert data == right
 
     #-----------------------------------------------------------------------
@@ -101,8 +108,8 @@ class Test_Dimmer:
         mdev.load_config({})
 
         # Send a level signal
-        dev.signal_level_changed.emit(dev, 0x12)
-        dev.signal_level_changed.emit(dev, 0x00)
+        dev.signal_state.emit(dev, level=0x12)
+        dev.signal_state.emit(dev, level=0x00)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic='%s/state' % topic,
@@ -115,9 +122,25 @@ class Test_Dimmer:
         link.client.clear()
 
         # Send a manual mode signal - should do nothing w/ the default config.
-        dev.signal_manual.emit(dev, IM.on_off.Manual.DOWN)
-        dev.signal_manual.emit(dev, IM.on_off.Manual.STOP)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.DOWN)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.STOP)
         assert len(link.client.pub) == 0
+
+    #-----------------------------------------------------------------------
+    def test_discovery(self, setup):
+        mdev, dev, link = setup.getAll(['mdev', 'dev', 'link'])
+        topic = "insteon/%s" % setup.addr.hex
+
+        mdev.load_config({"dimmer": {"junk": "junk"}})
+        assert mdev.default_discovery_cls == "dimmer"
+        assert mdev.rendered_topic_map == {
+            'manual_state_topic': None,
+            'on_off_topic': 'insteon/01.02.03/set',
+            'scene_topic': 'insteon/01.02.03/scene',
+            'state_topic': 'insteon/01.02.03/state',
+            'level_topic': 'insteon/01.02.03/level'
+        }
+        assert len(mdev.extra_topic_nums) == 0
 
     #-----------------------------------------------------------------------
     def test_config(self, setup):
@@ -135,8 +158,8 @@ class Test_Dimmer:
         mtopic = "bar/%s" % setup.addr.hex
 
         # Send a level signal
-        dev.signal_level_changed.emit(dev, 0xff)
-        dev.signal_level_changed.emit(dev, 0x00)
+        dev.signal_state.emit(dev, level=0xff)
+        dev.signal_state.emit(dev, level=0x00)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic=ltopic, payload='1 255', qos=qos, retain=True)
@@ -145,8 +168,8 @@ class Test_Dimmer:
         link.client.clear()
 
         # Send a manual signal
-        dev.signal_manual.emit(dev, IM.on_off.Manual.DOWN)
-        dev.signal_manual.emit(dev, IM.on_off.Manual.STOP)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.DOWN)
+        dev.signal_manual.emit(dev, manual=IM.on_off.Manual.STOP)
         assert len(link.client.pub) == 2
         assert link.client.pub[0] == dict(
             topic=mtopic, payload='-1 DOWN', qos=qos, retain=False)
@@ -207,6 +230,84 @@ class Test_Dimmer:
         # test error payload
         link.publish(otopic, b'asdf', qos, False)
         link.publish(ltopic, b'asdf', qos, False)
+
+    #-----------------------------------------------------------------------
+    def test_input_with_default_on_level(self, setup):
+        mdev, dev, link, proto = setup.getAll(['mdev', 'dev', 'link', 'proto'])
+
+        qos = 2
+        config = {'dimmer' : {
+            'on_off_topic' : 'foo/{{address}}',
+            'on_off_payload' : ('{ "cmd" : "{{json.on.lower()}}",'
+                                '"mode" : "{{json.mode.lower()}}" }'),
+            'level_topic' : 'bar/{{address}}',
+            'level_payload' : ('{ "cmd" : "{{json.on.lower()}}",'
+                               '"mode" : "{{json.mode.lower()}}"'
+                               '{% if json.level is defined %}'
+                               ',"level" : {{json.level}}'
+                               '{% endif %} }')}}
+        mdev.load_config(config, qos=qos)
+
+        mdev.subscribe(link, qos)
+        otopic = link.client.sub[0].topic
+        ltopic = link.client.sub[1].topic
+
+        # Set a default on-level that will be used by MQTT commands that don't
+        # specify a level.
+        assert dev.get_on_level() == 255
+        on_level = 128
+        params = {"on_level" : on_level}
+        dev.set_flags(None, **params)
+        assert proto.sent[0].msg.cmd1 == 0x2e
+        assert proto.sent[0].msg.cmd2 == 0x00
+        assert proto.sent[0].msg.data[0] == 0x01
+        assert proto.sent[0].msg.data[1] == 0x06
+        assert proto.sent[0].msg.data[2] == on_level
+        proto.clear()
+
+        # Fake having completed the set_on_level() request
+        flags = IM.message.Flags(IM.message.Flags.Type.DIRECT_ACK, False)
+        ack = IM.message.InpStandard(dev.addr.hex,
+                                     dev.modem.addr.hex,
+                                     flags, 0x2e, 0x00)
+        dev.handle_on_level(ack, IM.util.make_callback(None), on_level)
+        assert dev.get_on_level() == on_level
+
+        # Try multiple commands in a row; confirm for on commands, level goes
+        # to default on-level then to full brightness (just like would be done
+        # if the device's on-button is pressed).
+        # Fast-on should always go to full brightness.
+        on_off_tests = [("OFF", "NORMAL", 0x13, 0x00),
+                        ("ON", "NORMAL", 0x11, on_level),
+                        ("ON", "NORMAL", 0x11, 0xff),
+                        ("ON", "NORMAL", 0x11, on_level),
+                        ("OFF", "FAST", 0x14, 0x00),
+                        ("ON", "FAST", 0x12, 0xff),
+                        ("ON", "FAST", 0x12, 0xff),
+                        ("OFF", "INSTANT", 0x21, 0x00),
+                        ("ON", "INSTANT", 0x21, on_level),
+                        ("ON", "INSTANT", 0x21, 0xff),
+                        ("ON", "INSTANT", 0x21, on_level)]
+        # Try all on/off command tests with each topic
+        for topic in [otopic, ltopic]:
+            for command, mode, cmd1, cmd2 in on_off_tests:
+                payload = '{ "on" : "%s", "mode" : "%s" }' % (command, mode)
+                print("Trying:", topic, "=", payload)
+                link.publish(topic, bytes(payload, 'utf-8'), qos, retain=False)
+                assert len(proto.sent) == 1
+
+                assert proto.sent[0].msg.cmd1 == cmd1
+                assert proto.sent[0].msg.cmd2 == cmd2
+                proto.clear()
+
+                # Fake receiving the ack
+                flags = IM.message.Flags(IM.message.Flags.Type.DIRECT_ACK,
+                                         False)
+                ack = IM.message.InpStandard(dev.addr.hex,
+                                             dev.modem.addr.hex,
+                                             flags, cmd1, cmd2)
+                dev.handle_ack(ack, IM.util.make_callback(None))
+                assert dev._level == cmd2
 
     #-----------------------------------------------------------------------
     def test_input_on_off_reason(self, setup):
@@ -304,7 +405,7 @@ class Test_Dimmer:
 
     #-----------------------------------------------------------------------
     def test_input_scene_reason(self, setup):
-        mdev, link, proto = setup.getAll(['mdev', 'link', 'proto'])
+        mdev, link, proto, dev = setup.getAll(['mdev', 'link', 'proto', 'dev'])
 
         qos = 2
         config = {'dimmer' : {
@@ -322,9 +423,16 @@ class Test_Dimmer:
 
         assert proto.sent[0].msg.cmd1 == 0x30
         assert proto.sent[0].msg.data[3] == 0x13
-        cb = proto.sent[0].handler.callback
-        assert cb.keywords == {"reason" : "ABC"}
+        cb = proto.sent[0].handler.on_done
+        assert dev.broadcast_reason == ""
+        # Signal a failure
+        cb(False, "Done", None)
+        assert dev.broadcast_reason == ""
+        # Signal a success
+        cb(True, "Done", None)
+        assert dev.broadcast_reason == "ABC"
         proto.clear()
+        dev.broadcast_reason = ""
 
         payload = b'{ "on" : "ON", "reason" : "DEF" }'
         link.publish(topic, payload, qos, retain=False)
@@ -332,9 +440,62 @@ class Test_Dimmer:
 
         assert proto.sent[0].msg.cmd1 == 0x30
         assert proto.sent[0].msg.data[3] == 0x11
-        cb = proto.sent[0].handler.callback
-        assert cb.keywords == {"reason" : "DEF"}
+        cb = proto.sent[0].handler.on_done
+        # Signal a success
+        cb(True, "Done", None)
+        assert dev.broadcast_reason == "DEF"
         proto.clear()
 
+
+    #-----------------------------------------------------------------------
+    def test_input_scene_level(self, setup):
+        mdev, link, proto, dev = setup.getAll(['mdev', 'link', 'proto', 'dev'])
+
+        qos = 2
+        config = {'dimmer' : {
+            'scene_topic' : 'foo/{{address}}/scene',
+            'scene_payload' : ('{ "cmd" : "{{json.on.lower()}}"'
+                               '{% if json.level is defined %}'
+                               ',"level" : "{{json.level}}"'
+                               '{% endif %} }')}}
+        mdev.load_config(config, qos=qos)
+
+        mdev.subscribe(link, qos)
+        topic = link.client.sub[2].topic
+
+        # just ON command
+        payload = b'{ "on" : "on"}'
+        link.publish(topic, payload, qos, retain=False)
+        assert len(proto.sent) == 1
+        assert proto.sent[0].msg.cmd1 == 0x30
+        assert proto.sent[0].msg.data[3] == 0x11  #cmd1
+        assert proto.sent[0].msg.data[1] == 0x00  #use_on_level
+        assert proto.sent[0].msg.data[2] == 0x00  #on_level
+        cb = proto.sent[0].handler.on_done
+        # Check default reason value if not specified
+        cb(True, "Done", None)
+        assert dev.broadcast_reason == IM.on_off.REASON_DEVICE
+        proto.clear()
+        proto.clear()
+
+        # just OFF command
+        payload = b'{ "on" : "off"}'
+        link.publish(topic, payload, qos, retain=False)
+        assert len(proto.sent) == 1
+        assert proto.sent[0].msg.cmd1 == 0x30
+        assert proto.sent[0].msg.data[3] == 0x13  #cmd1
+        assert proto.sent[0].msg.data[1] == 0x01  #use_on_level
+        assert proto.sent[0].msg.data[2] == 0x00  #on_level
+        proto.clear()
+
+        # just ON with level
+        payload = b'{ "on" : "on", "level": 128}'
+        link.publish(topic, payload, qos, retain=False)
+        assert len(proto.sent) == 1
+        assert proto.sent[0].msg.cmd1 == 0x30
+        assert proto.sent[0].msg.data[3] == 0x11  #cmd1
+        assert proto.sent[0].msg.data[1] == 0x01  #use_on_level
+        assert proto.sent[0].msg.data[2] == 0x80  #on_level
+        proto.clear()
 
 #===========================================================================

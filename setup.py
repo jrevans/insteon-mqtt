@@ -8,7 +8,7 @@ test_requirements = open("requirements-test.txt").readlines()
 
 setuptools.setup(
     name = 'insteon-mqtt',
-    version = '0.7.2',
+    version = '1.2.0',
     description = "Insteon <-> MQTT bridge server",
     long_description = readme,
     author = "Ted Drain",
@@ -16,7 +16,10 @@ setuptools.setup(
     url = 'https://github.com/TD22057/insteon-mqtt',
     packages = setuptools.find_packages(exclude=["tests*"]),
     scripts = ['scripts/insteon-mqtt'],
-    include_package_data = True,
+    package_data = {
+        # include the schema files and config-base.yaml
+        "": ["data/*.yaml"],
+    },
     install_requires = requirements,
     license = "GNU General Public License v3",
     classifiers = [

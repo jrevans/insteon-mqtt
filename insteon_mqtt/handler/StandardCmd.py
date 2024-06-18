@@ -24,7 +24,7 @@ class StandardCmd(Base):
 
     When we get the InptStandard message we expect to see, it will be passed
     to the callback set in the constructor which is usually a method on the
-    device to handle the result (or the ACK that the command went through).
+    device to handle the ACK.
     """
     def __init__(self, msg, callback, on_done=None, num_retry=3):
         """Constructor
@@ -34,7 +34,7 @@ class StandardCmd(Base):
               reply must match the address and msg.cmd1 field to be
               processed by this handler.
           callback:  The message handler callback. This is called when a
-                     matching message is read.  Calling signature:
+                     matching ACK is read.  Calling signature:
                      callback( msg, on_done )
           on_done: The finished callback.  Calling signature:
                    on_done( bool success, str message, data )
@@ -66,15 +66,19 @@ class StandardCmd(Base):
           Msg.CONTINUE if we handled the message and expect more.
           Msg.FINISHED if we handled the message and are done.
         """
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
         # Probably an echo back of our sent message.
         if isinstance(msg, Msg.OutStandard):
             # If the message is the echo back of our message, then continue
             # waiting for a reply.
             if msg.to_addr == self.addr and msg.cmd1 == self.cmd:
                 if not msg.is_ack:
-                    LOG.error("%s NAK response", self.addr)
-
-                LOG.debug("%s got msg ACK", self.addr)
+                    LOG.warning("%s PLM NAK response", self.addr)
+                else:
+                    LOG.debug("%s got PLM ACK", self.addr)
+                    self._PLM_ACK = True
                 return Msg.CONTINUE
 
             # Message didn't match the expected addr/cmd.
@@ -82,17 +86,32 @@ class StandardCmd(Base):
             return Msg.UNKNOWN
 
         # See if this is the standard message ack/nak we're expecting.
-        elif isinstance(msg, Msg.InpStandard):
+        elif isinstance(msg, Msg.InpStandard) and self._PLM_ACK:
             # If this message matches our address and command, it's probably
             # the ACK we're expecting.
             if msg.from_addr == self.addr and msg.cmd1 == self.cmd:
-                # Run the callback - it's up to the callback to check if this
-                # is really the ACK or not.
-                self.callback(msg, on_done=self.on_done)
+                if msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
+                    if msg.cmd2 == msg.NakType.PRE_NAK:
+                        # This is a "Pre NAK in case database search takes
+                        # too long".  This happens when the device database is
+                        # large.  Just ignore it, add more wait time and wait.
+                        LOG.warning("%s Pre-NAK: %s, Message: %s",
+                                    msg.from_addr, msg.nak_str(), msg)
+                        return Msg.CONTINUE
+                    else:
+                        LOG.error("%s device NAK error: %s, Message: %s",
+                                  msg.from_addr, msg.nak_str(), msg)
+                        self.on_done(False, "Command failed. " +
+                                     msg.nak_str(), None)
+                        return Msg.FINISHED
 
-                # Indicate no more messages are expected.
-                return Msg.FINISHED
-            else:
+                elif msg.flags.type == Msg.Flags.Type.DIRECT_ACK:
+                    # Run the callback
+                    self.callback(msg, on_done=self.on_done)
+                    # Indicate no more messages are expected.
+                    return Msg.FINISHED
+
+                # Only make it here if this is a bad msg.
                 LOG.info("Possible unexpected message from %s cmd %#04x but "
                          "expected %s cmd %#04x", msg.from_addr, msg.cmd1,
                          self.addr, self.cmd)

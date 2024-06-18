@@ -30,6 +30,9 @@ from .Timed import Timed
 from .DbFlags import DbFlags
 from .Flags import Flags
 
+# Message Types
+from .CmdType import CmdType
+
 # Messages from PLM modem to the host (codes >= 0x60)
 from .InpAllLinkComplete import InpAllLinkComplete
 from .InpAllLinkFailure import InpAllLinkFailure
@@ -38,16 +41,22 @@ from .InpAllLinkStatus import InpAllLinkStatus
 from .InpStandard import InpStandard, InpExtended
 from .InpUserReset import InpUserReset
 from .InpUserSetBtn import InpUserSetBtn
+from .Unreachable import Unreachable
 
 # Messages from the host to the PLM modem (codes < 0x06)
 from .OutAllLinkCancel import OutAllLinkCancel
 from .OutAllLinkGetFirst import OutAllLinkGetFirst
 from .OutAllLinkGetNext import OutAllLinkGetNext
 from .OutAllLinkUpdate import OutAllLinkUpdate
+from .OutModemInfo import OutModemInfo
 from .OutModemLinking import OutModemLinking
 from .OutModemScene import OutModemScene
 from .OutResetModem import OutResetModem
+from .OutGetModemFlags import OutGetModemFlags
 from .OutStandard import OutStandard, OutExtended
+
+# Hub Messages
+from .HubUnknown import HubRFUnknown
 
 # Message handler status fields.
 UNKNOWN = -1
@@ -65,8 +74,10 @@ types = {
     0x56 : InpAllLinkFailure,
     0x57 : InpAllLinkRec,
     0x58 : InpAllLinkStatus,
+    0x5c : Unreachable,
 
     # host -> modem messages
+    0x60 : OutModemInfo,
     0x61 : OutModemScene,
     0x62 : OutStandard,  # Handles reading standard and extended
     0x64 : OutModemLinking,
@@ -75,4 +86,8 @@ types = {
     0x69 : OutAllLinkGetFirst,
     0x6a : OutAllLinkGetNext,
     0x6f : OutAllLinkUpdate,
+    0x73 : OutGetModemFlags,
+
+    # Hub Messages
+    0x7f : HubRFUnknown,
     }

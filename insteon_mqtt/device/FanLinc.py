@@ -6,7 +6,6 @@
 import enum
 import functools
 from .Dimmer import Dimmer
-from ..CommandSeq import CommandSeq
 from .. import handler
 from .. import log
 from .. import message as Msg
@@ -21,7 +20,7 @@ class FanLinc(Dimmer):
     """Insteon FanLinc fan speed control device.
 
     This class can be used to model a FanLinc module which is used to control
-    a ciling fan.  The FanLinc can be on or off and supports three speeds
+    a ceiling fan.  The FanLinc can be on or off and supports three speeds
     (LOW, MED, HIGH).  The FanLinc is also a dimmer switch and has the same
     signals and methods as that class (Dimmer).
 
@@ -31,10 +30,6 @@ class FanLinc(Dimmer):
 
     - signal_fan_speed( Device, bool is_on, on_off.Mode mode, str reason ):
       Sent whenever the switch is turned on or off.
-
-    - signal_manual( Device, on_off.Manual mode, str reason ): Sent when the
-      device starts or stops manual mode (when a button is held down or
-      released).
 
     """
     type_name = "fan_linc"
@@ -50,7 +45,7 @@ class FanLinc(Dimmer):
         HIGH = 0xff
         ON = -0x01   # turn on at last known speed
 
-    def __init__(self, protocol, modem, address, name=None):
+    def __init__(self, protocol, modem, address, name=None, config_extra=None):
         """Constructor
 
         Args:
@@ -60,8 +55,9 @@ class FanLinc(Dimmer):
           modem (Modem):  The Insteon modem used to find other devices.
           address (Address):  The address of the device.
           name (str):  Nice alias name to use for the device.
+          config_extra (dict): Extra configuration settings
         """
-        super().__init__(protocol, modem, address, name)
+        super().__init__(protocol, modem, address, name, config_extra)
 
         # Current fan speed.  We also store the last speed so that a generic
         # "on" command will use the last non-off speed that was seen.  Note
@@ -72,7 +68,7 @@ class FanLinc(Dimmer):
         # Support fan speed signals.  API: func(Device, Speed, str reason)
         self.signal_fan_speed = Signal()
 
-        # Remote (mqtt) commands mapped to methods calls.  Add to the base
+        # Remote (mqtt) commands to methods calls.  Add to the base
         # class defined commands.
         self.cmd_map.update({
             'fan_on' : self.fan_on,
@@ -80,91 +76,38 @@ class FanLinc(Dimmer):
             'fan_set' : self.fan_set,
             })
 
-    #-----------------------------------------------------------------------
-    def pair(self, on_done=None):
-        """Pair the device with the modem.
+        # Update the group map with the groups to be paired and the handler
+        # for broadcast messages from this group
+        # The fanlinc does not have any controllers it is only a responder
+        # This is necessary to override the dimmer group_map of 0x01
+        self.group_map = {}
 
-        This only needs to be called one time.  It will set the device as a
-        controller and the modem as a responder so the modem will see group
-        broadcasts and report them to us.
-
-        The device must already be a responder to the modem (push set on the
-        modem, then set on the device) so we can update it's database.
-
-        Args:
-          on_done: Finished callback.  This is called when the command has
-                   completed.  Signature is: on_done(success, msg, data)
-        """
-        LOG.info("FanLinc %s pairing", self.addr)
-
-        # Build a sequence of calls to the do the pairing.  This insures each
-        # call finishes and works before calling the next one.  We have to do
-        # this for device db manipulation because we need to know the memory
-        # layout on the device before making changes.
-        seq = CommandSeq(self.protocol, "FanLinc paired", on_done)
-
-        # Start with a refresh command - since we're changing the db, it must
-        # be up to date or bad things will happen.
-        seq.add(self.refresh)
-
-        # Add the device as a responder to the modem on group 1.  This is
-        # probably already there - and maybe needs to be there before we can
-        # even issue any commands but this check insures that the link is
-        # present on the device and the modem.
-        seq.add(self.db_add_resp_of, 0x01, self.modem.addr, 0x01,
-                refresh=False)
-
-        # Now add the device as the controller of the modem for groups 1
-        # (dimmer) and 2 (fan).
-        seq.add(self.db_add_ctrl_of, 0x01, self.modem.addr, 0x01,
-                refresh=False)
-        seq.add(self.db_add_ctrl_of, 0x02, self.modem.addr, 0x02,
-                refresh=False)
-
-        # Finally start the sequence running.  This will return so the
-        # network event loop can process everything and the on_done callbacks
-        # will chain everything together.
-        seq.run()
+        # List of responder group numbers
+        self.responder_groups = [0x01, 0x02]
 
     #-----------------------------------------------------------------------
-    def refresh(self, force=False, on_done=None):
-        """Refresh the current device state and database if needed.
+    def addRefreshData(self, seq, force=False):
+        """Add commands to refresh any internal data required.
 
-        This sends a ping to the device.  The reply has the current device
-        state (on/off, level, etc) and the current db delta value which is
-        checked against the current db value.  If the current db is out of
-        date, it will trigger a download of the database.
-
-        This will send out an updated signal for the current device status
-        whenever possible.
+        Send a 0x19 0x03 command to get the fan speed level.  This sends a
+        refresh ping which will respond w/ the fan level and current
+        database delta field.  Pass skip_db here - we'll let the
+        refresh handler take care of getting the database updated.
+        Otherwise this handler and the one created in the Base class refresh
+        would download the database twice.
 
         Args:
+          seq (CommandSeq): The command sequence to add the command to.
           force (bool):  If true, will force a refresh of the device database
                 even if the delta value matches as well as a re-query of the
                 device model information even if it is already known.
-          on_done: Finished callback.  This is called when the command has
-                   completed.  Signature is: on_done(success, msg, data)
         """
-        LOG.info("Device %s cmd: fan status refresh", self.addr)
-
-        seq = CommandSeq(self.protocol, "Refresh complete", on_done)
-
-        # Send a 0x19 0x03 command to get the fan speed level.  This sends a
-        # refresh ping which will respond w/ the fan level and current
-        # database delta field.  Pass skip_db here - we'll let the dimmer
-        # refresh handler above take care of getting the database updated.
-        # Otherwise this handler and the one created in the dimmer refresh
-        # would download the database twice.
         msg = Msg.OutStandard.direct(self.addr, 0x19, 0x03)
         msg_handler = handler.DeviceRefresh(self, self.handle_refresh_fan,
                                             force=False, num_retry=3,
                                             skip_db=True)
         seq.add_msg(msg, msg_handler)
-
-        # If we get the FAN state correctly, then have the dimmer also get
-        # it's state and update the database if necessary.
-        seq.add(Dimmer.refresh, self, force)
-        seq.run()
+        super().addRefreshData(seq, force=force)
 
     #-----------------------------------------------------------------------
     def fan_on(self, speed=None, reason="", on_done=None):
@@ -245,6 +188,61 @@ class FanLinc(Dimmer):
         self.send(msg, msg_handler)
 
     #-----------------------------------------------------------------------
+    def on(self, group=0x01, level=None, mode=on_off.Mode.NORMAL, reason="",
+           transition=None, on_done=None):
+        """This extends the method in ResponderBase to handle the fan group.
+
+        Args:
+          group (int):  The group to send the command to.
+          level (int):  If non-zero, turn the device on.  The API is an int
+                to keep a consistent API with other devices.
+          mode (on_off.Mode): The type of command to send (normal, fast, etc).
+          transition (int): Transition time in seconds if supported.
+          reason (str):  This is optional and is used to identify why the
+                 command was sent. It is passed through to the output signal
+                 when the state changes - nothing else is done with it.
+          on_done: Finished callback.  This is called when the command has
+                   completed.  Signature is: on_done(success, msg, data)
+        """
+        # If group 2, then this is for Fan
+        if group == 0x02:
+            speed = None
+            if level is not None:
+                if level >= 0 and level <= 85:
+                    speed = FanLinc.Speed.LOW
+                elif level > 85 and level <= 170:
+                    speed = FanLinc.Speed.MEDIUM
+                elif level > 170:
+                    speed = FanLinc.Speed.HIGH
+            self.fan_on(speed=speed, reason=reason, on_done=on_done)
+        else:
+            # This is a regular on command pass to ResponderBase
+            super().on(group=group, level=level, mode=mode, reason=reason,
+                       transition=transition, on_done=on_done)
+
+    #-----------------------------------------------------------------------
+    def off(self, group=0x01, mode=on_off.Mode.NORMAL, reason="",
+            transition=None, on_done=None):
+        """This extends the method in ResponderBase to handle the fan group.
+
+        Args:
+          group (int):  The group to send the command to.
+          mode (on_off.Mode): The type of command to send (normal, fast, etc).
+          reason (str):  This is optional and is used to identify why the
+                 command was sent. It is passed through to the output signal
+                 when the state changes - nothing else is done with it.
+          on_done: Finished callback.  This is called when the command has
+                   completed.  Signature is: on_done(success, msg, data)
+        """
+        # If group 2, then this is for Fan
+        if group == 0x02:
+            self.fan_off(reason=reason, on_done=on_done)
+        else:
+            # This is a regular on command pass to ResponderBase
+            super().off(group=group, mode=mode, reason=reason,
+                        transition=transition, on_done=on_done)
+
+    #-----------------------------------------------------------------------
     def fan_set(self, speed, reason="", on_done=None):
         """Set the fan speed.
 
@@ -273,28 +271,6 @@ class FanLinc(Dimmer):
             self.fan_on(speed, reason, on_done)
         else:
             self.fan_off(reason, on_done)
-
-    #-----------------------------------------------------------------------
-    def handle_broadcast(self, msg):
-        """Handle broadcast messages from this device.
-
-        The broadcast message from a device is sent when the device is
-        triggered.  The message has the group ID in it.  We'll update the
-        device state and look up the group in the all link database.  For
-        each device that is in the group (as a reponsder), we'll call
-        handle_group_cmd() on that device to trigger it.  This way all the
-        devices in the group are updated to the correct values when we see
-        the broadcast message.
-
-        Args:
-          msg (InpStandard):  Broadcast message from the device.
-        """
-        # NOTE: the fan linc shouldn't be able to initialize a broadcast
-        # message.  That's for actuators (switches, motion sensors, etc) to
-        # trigger other things to occur.  Since the fan linc is just a
-        # responder to other commands, that shouldn't occur.
-        LOG.error("FanLinc unexpected handle_broadcast called: %s", msg)
-        super.handle_broadcast(msg)
 
     #-----------------------------------------------------------------------
     def handle_refresh_fan(self, msg):
@@ -338,19 +314,12 @@ class FanLinc(Dimmer):
 
         # If this it the ACK we're expecting, update the internal state and
         # emit our signals.
-        if msg.flags.type == Msg.Flags.Type.DIRECT_ACK:
-            LOG.debug("FanLinc fan %s ACK: %s", self.addr, msg)
+        LOG.debug("FanLinc fan %s ACK: %s", self.addr, msg)
 
-            reason = reason if reason else on_off.REASON_COMMAND
-            self._set_fan_speed(msg.cmd2, reason)
-            on_done(True, "Fan %s state updated to %s" %
-                    (self.addr, self._fan_speed), msg.cmd2)
-
-        elif msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-            LOG.error("FanLinc fan %s NAK error: %s, Message: %s", self.addr,
-                      msg.nak_str(), msg)
-            on_done(False, "Fan %s state update failed. " + msg.nak_str(),
-                    None)
+        reason = reason if reason else on_off.REASON_COMMAND
+        self._set_fan_speed(msg.cmd2, reason)
+        on_done(True, "Fan %s state updated to %s" %
+                (self.addr, self._fan_speed), msg.cmd2)
 
     #-----------------------------------------------------------------------
     def handle_group_cmd(self, addr, msg):
@@ -464,8 +433,8 @@ class FanLinc(Dimmer):
                    {'group': data[2]}]
             if data[2] <= 0x01:
                 ramp = 0x1f  # default
-                if data[1] in Dimmer.ramp_pretty:
-                    ramp = Dimmer.ramp_pretty[data[1]]
+                if data[1] in self.ramp_pretty:
+                    ramp = self.ramp_pretty[data[1]]
                 ret = [{'on_level': int((data[0] / .255) + .5) / 10},
                        {'ramp_rate': ramp},
                        {'group': data[2]}]
@@ -486,23 +455,17 @@ class FanLinc(Dimmer):
         Returns:
           list[3]: List of Data1-3 values
         """
-        data_1 = None
-        if 'data_1' in data:
-            data_1 = data['data_1']
-        data_2 = None
-        if 'data_2' in data:
-            data_2 = data['data_2']
-        data_3 = None
-        if 'data_3' in data:
-            data_3 = data['data_3']
+        data_1, data_2, data_3 = super().link_data_from_pretty(is_controller,
+                                                               data)
         if not is_controller:
             if 'group' in data:
                 data_3 = data['group']
-                if 'ramp' in data and data['group'] <= 0x01:
-                    data_2 = 0x1f
-                    for ramp_key, ramp_value in Dimmer.ramp_pretty:
-                        if data['ramp'] >= ramp_value:
-                            data_2 = ramp_key
+            if 'ramp_rate' in data and (data_3 is None or data_3 <= 0x01):
+                data_2 = 0x1f
+                for ramp_key, ramp_value in self.ramp_pretty.items():
+                    if data['ramp_rate'] >= ramp_value:
+                        data_2 = ramp_key
+                        break
             if 'on_level' in data:
                 data_1 = int(data['on_level'] * 2.55 + .5)
         return [data_1, data_2, data_3]

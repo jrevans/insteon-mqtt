@@ -21,6 +21,8 @@ class Test_StandardCmd:
         # sent message, match input command
         out = Msg.OutStandard.direct(addr, 0x11, 0xff)
         handler = IM.handler.StandardCmd(out, callback)
+        handler._PLM_sent = True
+        handler._PLM_ACK = True
 
         r = handler.msg_received(proto, "dummy")
         assert r == Msg.UNKNOWN
@@ -40,6 +42,12 @@ class Test_StandardCmd:
         out.to_addr = IM.Address('0a.12.33')
         r = handler.msg_received(proto, out)
         assert r == Msg.UNKNOWN
+
+        # direct Pre NAK
+        flags = Msg.Flags(Msg.Flags.Type.DIRECT_NAK, False)
+        msg = Msg.InpStandard(addr, addr, flags, 0x11, 0xFC)
+        r = handler.msg_received(proto, msg)
+        assert r == Msg.CONTINUE
 
         # Now pass in the input message.
 
@@ -77,6 +85,8 @@ class Test_StandardCmd:
         # sent message, match input command
         out = Msg.OutStandard.direct(addr, 0x11, 0xff)
         handler = IM.handler.StandardCmd(out, callback)
+        handler._PLM_sent = True
+        handler._PLM_ACK = True
 
         # right cmd
         r = handler.msg_received(proto, out)
@@ -111,6 +121,8 @@ class Test_StandardCmd:
         # sent message, match input command
         out = Msg.OutStandard.direct(addr, 0x11, 0x00)
         handler = IM.handler.StandardCmd(out, callback)
+        handler._PLM_sent = True
+        handler._PLM_ACK = True
 
         r = handler.msg_received(proto, out)
         assert r == Msg.CONTINUE
@@ -127,13 +139,48 @@ class Test_StandardCmd:
         assert calls[0] == msg
 
     #-----------------------------------------------------------------------
+    def test_plm_sent_ack(self, tmpdir):
+        proto = MockProto()
+        modem = MockModem(tmpdir)
+        calls = []
+        addr = IM.Address('0a.12.34')
+        device = IM.device.base.Base(proto, modem, addr)
+
+        def callback(success, msg, data):
+            calls.append(msg)
+
+        # test PLM_sent flag
+        out = Msg.OutStandard.direct(addr, 0x0D, 0x00)
+        handler = IM.handler.StandardCmd(out, device.handle_engine, callback)
+        flags = Msg.Flags(Msg.Flags.Type.DIRECT_ACK, False)
+        msg = Msg.InpStandard(addr, addr, flags, 0x0D, 0x00)
+        r = handler.msg_received(proto, msg)
+        assert r == Msg.UNKNOWN
+        assert not handler._PLM_sent
+
+        # Signal Sent
+        handler.sending_message(out)
+        assert handler._PLM_sent
+
+        # test PLM nak
+        r = handler.msg_received(proto, out)
+        assert r == Msg.CONTINUE
+        assert not handler._PLM_ACK
+
+        # test PLM ack
+        out.is_ack = True
+        r = handler.msg_received(proto, out)
+        assert r == Msg.CONTINUE
+        assert handler._PLM_ACK
+
+    #-----------------------------------------------------------------------
     def test_engine_version(self, tmpdir):
         # Tests response to get engine version
         proto = MockProto()
         modem = MockModem(tmpdir)
         calls = []
         addr = IM.Address('0a.12.34')
-        device = IM.device.Base(proto, modem, addr)
+        device = IM.device.base.Base(proto, modem, addr)
 
         def callback(success, msg, data):
             calls.append(msg)
@@ -143,6 +190,8 @@ class Test_StandardCmd:
         handler = IM.handler.StandardCmd(out, device.handle_engine, callback)
         flags = Msg.Flags(Msg.Flags.Type.DIRECT_ACK, False)
         msg = Msg.InpStandard(addr, addr, flags, 0x0D, 0x00)
+        handler._PLM_sent = True
+        handler._PLM_ACK = True
         r = handler.msg_received(proto, msg)
         assert r == Msg.FINISHED
         assert calls[0] == "Operation complete"

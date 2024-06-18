@@ -9,7 +9,10 @@ __doc__ = """Configuration file utilties
 
 #===========================================================================
 import os.path
+import re
 import yaml
+from cerberus import Validator
+from cerberus.errors import BasicErrorHandler
 from . import device
 
 # Configuration file input description to class map.
@@ -18,10 +21,12 @@ devices = {
     # class to use and any extra keyword args to pass to the constructor.
     'dimmer' : (device.Dimmer, {}),
     'battery_sensor' : (device.BatterySensor, {}),
+    "ezio4o": (device.EZIO4O, {}),
     'fan_linc' : (device.FanLinc, {}),
+    'hidden_door' : (device.HiddenDoor, {}),
     'io_linc' : (device.IOLinc, {}),
-    'keypad_linc' : (device.KeypadLinc, {'dimmer' : True}),
-    'keypad_linc_sw' : (device.KeypadLinc, {'dimmer' : False}),
+    'keypad_linc' : (device.KeypadLincDimmer, {}),
+    'keypad_linc_sw' : (device.KeypadLinc, {}),
     'leak' : (device.Leak, {}),
     'mini_remote1' : (device.Remote, {'num_button' : 1}),
     'mini_remote4' : (device.Remote, {'num_button' : 4}),
@@ -35,8 +40,91 @@ devices = {
 
 
 #===========================================================================
+def validate(path):
+    """Validates the configuration file against the defined schema
+
+    Args:
+      path:  The file to load
+
+    Returns:
+      string: the failure message text or an empty string if no errors
+    """
+    error = ""
+
+    # Check the main config file first
+    document = load(path)
+    error += validate_file(document, 'config-schema.yaml', 'configuration')
+
+    # Check the Scenes file
+    insteon = document.get('insteon', {})
+    scenes_path = insteon.get('scenes', None)
+    if scenes_path is not None:
+        with open(scenes_path, "r") as f:
+            document = yaml.load(f, Loader)
+        # This is a bit hacky, we have to move the scenes contents into a
+        # root key because cerberus has to have a root key
+        scenes = {"scenes": document}
+        error += validate_file(scenes, 'scenes-schema.yaml', 'scenes')
+
+    return error
+
+
+#===========================================================================
+def validate_file(document, schema_file, name):
+    """ This is used to validate a generic yaml file.
+
+    We use it to validate both the config and scenes files.
+
+    Returns:
+      (str): An error message string, or an empty string if no errors.
+    """
+    basepath = os.path.dirname(__file__)
+    schema = None
+    schema_file_path = os.path.join(basepath, 'data', schema_file)
+    with open(schema_file_path, "r") as f:
+        schema = yaml.load(f, Loader=yaml.Loader)
+
+    v = IMValidator(schema, error_handler=MetaErrorHandler(schema=schema))
+    valid = v.validate(document)
+
+    if valid:
+        return ""
+    else:
+        return """
+                 ------- Validation Error -------
+An error occured while trying to validate your %s file.  Please
+review the errors below and fix the error.  InsteonMQTT cannot run until this
+error is fixed.
+
+""" % (name) + parse_validation_errors(v.errors)
+
+
+#===========================================================================
+def parse_validation_errors(errors, indent=0):
+    """ This creates a nice presentation of the error for the User
+
+    The error list looks a lot like the yaml document.  Running it through
+    yaml.dump() was ok.  However, doing it this way allows us to have
+    multiline error messages with nice indentations and such.
+    """
+    error_msg = ""
+    for key in errors.keys():
+        error_msg += " " * indent + str(key) + ": \n"
+        for item in errors[key]:
+            if isinstance(item, dict):
+                error_msg += parse_validation_errors(item, indent=indent + 2)
+            else:
+                item = item.replace("\n", "\n  " + " " * (indent + 2))
+                error_msg += " " * (indent) + "- " + str(item) + "\n"
+    return error_msg
+
+
+#===========================================================================
 def load(path):
     """Load the configuration file.
+
+    This will first load the base config and then overlay the user config
+    on top of this
 
     Args:
       path:  The file to load
@@ -44,8 +132,53 @@ def load(path):
     Returns:
       dict: Returns the configuration dictionary.
     """
+    basepath = os.path.dirname(__file__)
+    base_config_path = os.path.join(basepath, 'data', 'config-base.yaml')
+    base_config = {}
+    user_config = {}
+
+    with open(base_config_path, "r") as f:
+        base_config = yaml.load(f, Loader)
+
     with open(path, "r") as f:
-        return yaml.load(f, Loader)
+        user_config = yaml.load(f, Loader)
+
+    return overlay(base_config, user_config)
+
+
+#===========================================================================
+def overlay(base_config, user_config):
+    """This overlays a user config file on top of the base config file
+
+    This essentially merges the two yaml files into a single config using the
+    following rules
+
+    1. Any unique key found in user_config will be added to the base_config.
+    2. Any value in user_config that __is not__ an instance of dict, will be
+       copied to the same key in base_config.
+    3. Any value in user_config that __is__ a dict, will be recursively
+       examined applying these same rules.
+
+    Returns:
+      (dict): the merged config
+
+    """
+    if isinstance(base_config, dict):
+        base_copy = base_config.copy()
+        for key in user_config:
+            if key not in base_copy:
+                # This is a new unique key, just push into base
+                base_copy[key] = user_config[key]
+            elif isinstance(user_config[key], dict):
+                # The value of the key in user is a dict, recursively process
+                base_copy[key] = overlay(base_copy[key], user_config[key])
+            else:
+                # The value of the key in user is not a dict, overwrite base
+                base_copy[key] = user_config[key]
+    else:
+        # base is not a dict, so push user value into base
+        base_copy = user_config
+    return base_copy
 
 
 #===========================================================================
@@ -163,5 +296,132 @@ class Loader(yaml.Loader):
             msg = ("Error: unrecognized node type in !rel_path statement: %s"
                    % str(node))
             raise yaml.constructor.ConstructorError(msg)
+
+
+#===========================================================================
+class MetaErrorHandler(BasicErrorHandler):
+    """ Used for adding custom fail message for a better UX
+
+    This is part of the Cerberus yaml validation schema.
+
+    When a test fails, this will search the contents of each meta keyword
+    in each key of the search path starting from the root.  If the meta
+    value contains a key with the failed test name appended with "_error"
+    that message will be used in place of the standard message.
+
+    For example if the following regex fails it creates a custom error:
+    mqtt:
+      schema:
+        cmd_topic:
+          regex: '^[^/+][^+]*[^/+#]$'
+          meta:
+            regex_error: Custom regex error message
+
+    """
+    messages = BasicErrorHandler.messages
+    messages[0x92] = "zero or more than one rule validate, when exactly " + \
+                     "one is required"
+
+    def __init__(self, schema=None, tree=None):
+        self.schema = schema
+        super().__init__(tree)
+
+    def __iter__(self):
+        """ This is not implemented here either.
+        """
+        raise NotImplementedError
+
+    def _format_message(self, field, error):
+        """ Hijack the _format_message of the base class to insert our own
+        messages.
+
+        """
+        error_msg = self._find_meta_error(error.schema_path)
+        if error_msg is not None:
+            return error_msg
+        else:
+            return super()._format_message(field, error)
+
+    def _find_meta_error(self, error_path):
+        """ Gets the meta error message if there is one
+
+        This function recursively parses the search path for the meta keyword
+        starting at the root and working updwards, so that it always returns
+        the most specific meta value that it can find.
+        """
+        schema_part = self.schema
+        error_msg = None
+        for iter in range(len(error_path)):
+            error_key = error_path[iter]
+            if isinstance(error_key, str):
+                schema_part = schema_part.get(error_key, None)
+            else:
+                # This is likely an int representing the position in a list
+                schema_part = schema_part[error_key]
+            if isinstance(schema_part, dict):
+                meta = schema_part.get('meta', None)
+                if meta is not None:
+                    error_msg = self._find_error(meta, error_path, iter)
+            elif isinstance(schema_part, list):
+                continue
+            else:
+                break
+        return error_msg
+
+    def _find_error(self, meta, error_path, iter):
+        """ Gets the failed test error message if there is one
+
+        This function recursively parses the search path for the failed test
+        keyword starting at the base of meta and working updwards, the error
+        message the deepest into the error_path is returned.
+        """
+        error_msg = None
+        for meta_iter in range(iter + 1, len(error_path)):
+            if not isinstance(meta, dict):
+                break
+            if error_path[meta_iter] + "_error" in meta:
+                meta = meta[error_path[meta_iter] + "_error"]
+            else:
+                break
+        if isinstance(meta, str):
+            error_msg = meta
+        return error_msg
+
+
+#===========================================================================
+class IMValidator(Validator):
+    """ Adds a few check_with functions to validate specific settings
+    """
+    def _check_with_valid_insteon_addr(self, field, value):
+        """ Tests whether value is a valid Insteon Address for Insteon MQTT
+
+        Accepts any of the following:
+          - (int) in range of 0 - 0xFFFFFF
+          - (str) in any case:
+            - No seperators - AABBCC
+            - Space, dot or colon seperators - AA.BB.CC, AA BB CC, AA:BB:CC
+        """
+        valid = False
+        # Try Integer First
+        try:
+            addr = int(value)
+        except ValueError:
+            pass
+        else:
+            if addr >= 0 and addr <= 0xFFFFFF:
+                valid = True
+
+        # See if valid string form
+        if not valid:
+            addr = re.search(
+                r"^[A-F0-9]{2}[ \.:]?[A-F0-9]{2}[ \.:]?[A-F0-9]{2}$",
+                str(value), flags=re.IGNORECASE
+            )
+            if addr is not None:
+                valid = True
+
+        if not valid:
+            self._error(field, "Insteon Addresses can be represented as: \n"
+                        "aa.bb.cc, aabbcc, or aa:bb:cc")
 
 #===========================================================================

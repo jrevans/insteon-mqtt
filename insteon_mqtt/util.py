@@ -5,6 +5,9 @@
 #===========================================================================
 import binascii
 import io
+from . import log
+
+LOG = log.get_logger()
 
 
 def to_hex(data, num=None, space=' '):
@@ -198,8 +201,8 @@ def input_bool(inputs, field):
         # only true/false or 1/0 is allowed.
         return bool(int(value))
     except ValueError:
-        msg = "Invalid %s input.  Valid inputs are 1/0 or True/False" % input
-        raise ValueError(msg)
+        msg = "Invalid %s input.  Valid inputs are 1/0 or True/False" % field
+        LOG.exception(msg)
 
 
 #===========================================================================
@@ -236,8 +239,8 @@ def input_integer(inputs, field):
         else:
             return int(value)
     except ValueError:
-        msg = "Invalid %s input.  Valid inputs are integer values." % input
-        raise ValueError(msg)
+        msg = "Invalid %s input.  Valid inputs are integer values." % field
+        LOG.exception(msg)
 
 
 #===========================================================================
@@ -278,5 +281,38 @@ def input_byte(inputs, field):
 
         return v
     except ValueError:
-        msg = "Invalid %s input.  Valid inputs are 0-255" % input
-        raise ValueError(msg)
+        msg = "Invalid %s input.  Valid inputs are 0-255" % field
+        LOG.exception(msg)
+
+
+#===========================================================================
+def input_float(inputs, field):
+    """Convert an input field to an float.
+
+    Raises:
+      If the input is not a valid float, an exception is thrown.
+
+    Args:
+      inputs (dict):  Key/value pairs of user inputs.
+      field (str): The field to get.
+
+    Returns:
+      Returns None if field is not in inputs.  Otherwise the input field
+      is converted to an integer and returned.
+    """
+    value = inputs.pop(field, None)
+    if value is None:
+        return None
+
+    try:
+        if isinstance(value, str):
+            lv = value.lower()
+            if lv == 'none':
+                return None
+            else:
+                return float(value)
+        else:
+            return float(value)
+    except ValueError:
+        msg = "Invalid %s input.  Valid inputs are float values." % field
+        LOG.exception(msg)

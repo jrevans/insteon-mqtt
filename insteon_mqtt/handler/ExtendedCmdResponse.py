@@ -64,6 +64,9 @@ class ExtendedCmdResponse(Base):
           Msg.CONTINUE if we handled the message and expect more.
           Msg.FINISHED if we handled the message and are done.
         """
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
         # Probably an echo back of our sent message.  See if the message
         # matches the address we sent to and assume it's the ACK/NAK message.
         # These seem to be either extended or standard message so allow for
@@ -71,13 +74,16 @@ class ExtendedCmdResponse(Base):
         if isinstance(msg, (Msg.OutExtended, Msg.OutStandard)):
             if msg.to_addr == self.addr and msg.cmd1 == self.cmd:
                 if not msg.is_ack:
-                    LOG.error("%s NAK response", self.addr)
+                    LOG.warning("%s PLM NAK response", self.addr)
+                else:
+                    LOG.debug("%s PLM ACK", self.addr)
+                    self._PLM_ACK = True
                 return Msg.CONTINUE
 
             return Msg.UNKNOWN
 
         # Probably an ACK/NAK from the device for our get command.
-        elif isinstance(msg, Msg.InpStandard):
+        elif isinstance(msg, Msg.InpStandard) and self._PLM_ACK:
             # Filter by address and command.
             if msg.from_addr != self.addr or msg.cmd1 != self.cmd:
                 return Msg.UNKNOWN
@@ -88,18 +94,26 @@ class ExtendedCmdResponse(Base):
                 return Msg.CONTINUE
 
             elif msg.flags.type == Msg.Flags.Type.DIRECT_NAK:
-                LOG.error("%s device NAK error: %s, Message: %s",
-                          msg.from_addr, msg.nak_str(), msg)
-                self.on_done(False, "Device command NAK. " + msg.nak_str(),
-                             None)
-                return Msg.FINISHED
+                if msg.cmd2 == msg.NakType.PRE_NAK:
+                    # This is a "Pre NAK in case database search takes
+                    # too long".  This happens when the device database is
+                    # large.  Just ignore it, add more wait time and wait.
+                    LOG.warning("%s Pre-NAK: %s, Message: %s", msg.from_addr,
+                                msg.nak_str(), msg)
+                    return Msg.CONTINUE
+                else:
+                    LOG.error("%s device NAK error: %s, Message: %s",
+                              msg.from_addr, msg.nak_str(), msg)
+                    self.on_done(False, "Device command NAK. " + msg.nak_str(),
+                                 None)
+                    return Msg.FINISHED
 
             else:
                 LOG.warning("%s device unexpected msg: %s", msg.from_addr, msg)
                 return Msg.UNKNOWN
 
         # Process the payload reply.
-        elif isinstance(msg, Msg.InpExtended):
+        elif isinstance(msg, Msg.InpExtended) and self._PLM_ACK:
             # Filter by address and command.
             if msg.from_addr == self.addr and msg.cmd1 == self.cmd:
                 # Run the callback - it's up to the callback to check if this

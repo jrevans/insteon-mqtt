@@ -3,6 +3,8 @@
 # Network link to an MQTT client class
 #
 #===========================================================================
+import ssl
+import sys
 import paho.mqtt.client as paho
 from .. import log
 from ..Signal import Signal
@@ -27,6 +29,42 @@ class Mqtt(Link):
     Input fields can be set via the constructor or by loading a configuration
     file (see load_config for details).
     """
+
+    # map for Paho acceptable TLS cert request options
+    CERT_REQ_OPTIONS = {'none': ssl.CERT_NONE, 'required': ssl.CERT_REQUIRED}
+
+    # Map for Paho acceptable TLS version options. Some options are
+    # dependent on the OpenSSL install so catch exceptions
+    TLS_VER_OPTIONS = dict()
+    try:
+        TLS_VER_OPTIONS['tls'] = ssl.PROTOCOL_TLS
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['tlsv1'] = ssl.PROTOCOL_TLSv1
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['tlsv11'] = ssl.PROTOCOL_TLSv1_1
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['tlsv12'] = ssl.PROTOCOL_TLSv1_2
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['sslv2'] = ssl.PROTOCOL_SSLv2
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['sslv23'] = ssl.PROTOCOL_SSLv23
+    except AttributeError:
+        pass
+    try:
+        TLS_VER_OPTIONS['sslv3'] = ssl.PROTOCOL_SSLv3
+    except AttributeError:
+        pass
+
     def __init__(self, host="127.0.0.1", port=1883, id=None,
                  reconnect_dt=10):
         """Construct an MQTT client.
@@ -49,6 +87,7 @@ class Mqtt(Link):
         self.port = port
         self.connected = False
         self.id = id if id is not None else "insteon-mqtt"
+        self.availability_topic = "insteon/availability"
 
         # Insure poll is called at least once every 30 seconds so we can send
         # a keep alive message to the server so our connection doesn't get
@@ -59,8 +98,19 @@ class Mqtt(Link):
         self._reconnect_dt = reconnect_dt
         self._fd = None
 
-        # Create the MQTT client and set the callbacks to our methods.
-        self.client = paho.Client(client_id=self.id, clean_session=False)
+        self.setup_client()
+
+    #-----------------------------------------------------------------------
+    def setup_client(self):
+        """ Create or reinitialise the MQTT client and set the callbacks.
+        """
+
+        client_args = {'client_id': self.id, 'clean_session': False}
+
+        if not hasattr(self, 'client'):
+            self.client = paho.Client(**client_args)
+        else:
+            self.client.reinitialise(**client_args)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
@@ -76,7 +126,8 @@ class Mqtt(Link):
         - broker (str):  The broker host to connect to.
         - port (int):  The broker port to connect to.
         - username (str):  Optional user name to log in with.
-        - passord (str):  Optional password to log in with.
+        - password (str):  Optional password to log in with.
+        - id (str): Optional MQTT client id (max 23 characters)
 
         Args:
           config (dict):  Configuration data to load.
@@ -85,12 +136,64 @@ class Mqtt(Link):
 
         self.host = config['broker']
         self.port = config['port']
+        self.availability_topic = config['availability_topic']
         self.keep_alive = config.get("keep_alive", self.keep_alive)
+
+        id = config.get("id")
+        if id is not None:
+            self.id = id
+            self.setup_client()
+
+        self.client.will_set(self.availability_topic, payload="offline",
+                             qos=0, retain=True)
 
         username = config.get('username', None)
         if username is not None:
             password = config.get('password', None)
             self.client.username_pw_set(username, password)
+
+        encryption = config.get('encryption', {})
+        if encryption is None:
+            encryption = {}
+        ca_cert = encryption.get('ca_cert', None)
+        if ca_cert is not None and ca_cert != "":
+            LOG.info("Using TLS for MQTT broker connection.")
+            # Set the basic arguments
+            certfile = encryption.get('certfile', None)
+            if certfile == "":
+                certfile = None
+            keyfile = encryption.get('keyfile', None)
+            if keyfile == "":
+                keyfile = None
+            ciphers = encryption.get('ciphers', None)
+            if ciphers == "":
+                ciphers = None
+
+            # These require passing specific constants so we use a lookup
+            # map for them.
+            addl_tls_kwargs = {}
+            tls_ver = encryption.get('tls_version', 'tls')
+            tls_version_const = self.TLS_VER_OPTIONS.get(tls_ver, None)
+            if tls_version_const is not None:
+                addl_tls_kwargs['tls_version'] = tls_version_const
+            cert_reqs = encryption.get('cert_reqs', None)
+            cert_reqs = self.CERT_REQ_OPTIONS.get(cert_reqs, None)
+            if cert_reqs is not None:
+                addl_tls_kwargs['cert_reqs'] = cert_reqs
+
+            # Finally, try the connection
+            try:
+                self.client.tls_set(ca_certs=ca_cert,
+                                    certfile=certfile,
+                                    keyfile=keyfile,
+                                    ciphers=ciphers, **addl_tls_kwargs)
+            except FileNotFoundError as e:
+                LOG.error("Cannot locate a SSL/TLS file = %s.", e)
+                sys.exit()
+
+            except ssl.SSLError as e:
+                LOG.error("SSL/TLS Config error = %s.", e)
+                sys.exit()
 
     #-----------------------------------------------------------------------
     def publish(self, topic, payload, qos=0, retain=False):
@@ -173,8 +276,11 @@ class Mqtt(Link):
             passed in so that all clients receive the same "current" time
             instead of each calling time.time() and getting a different value.
         """
-        # This is required to handle keepalive messages.
-        self.client.loop_misc()
+        # This is required to handle keepalive messages and detect
+        # disconnections.
+        rc = self.client.loop_misc()
+        if rc == paho.MQTT_ERR_NO_CONN:
+            self._on_disconnect(self.client, None, rc)
 
     #-----------------------------------------------------------------------
     def retry_connect_dt(self):
@@ -204,6 +310,16 @@ class Mqtt(Link):
             LOG.info("MQTT device opened %s %s with keepalive=%s", self.host,
                      self.port, self.keep_alive)
             return True
+        except ssl.SSLError as e:
+            # Sadly the exceptions returned are too general to give good
+            # instructions to the user.
+            LOG.error("MQTT SSL/TLS connection error to %s %s. Error %s "
+                      "Check if port is correct, if hostname matches cert. "
+                      "If you have specified tls_version or ciphers, check "
+                      "those too.",
+                      self.host, self.port, e)
+            sys.exit()
+
         except:
             LOG.exception("MQTT connection error to %s %s", self.host,
                           self.port)
@@ -262,6 +378,9 @@ class Mqtt(Link):
         """
         LOG.info("MQTT device closing %s %s", self.host, self.port)
 
+        self.client.publish(self.availability_topic, payload="offline", qos=0,
+                            retain=True)
+
         self.client.disconnect()
         self.signal_needs_write.emit(self, True)
 
@@ -281,6 +400,9 @@ class Mqtt(Link):
         """
         if result == 0:
             self.connected = True
+            self.signal_connected.emit(self, True)
+            self.client.publish(self.availability_topic, payload="online",
+                                qos=0, retain=True)
         else:
             LOG.error("MQTT connection refused %s %s %s", self.host, self.port,
                       result)
@@ -327,10 +449,17 @@ class Mqtt(Link):
           level (int):  Logging level.
           buf (str):  The message to log.
         """
-        # Send a very low level logging message so we can turn on level 5
-        # logging at the top level to see what is happening in the MQTT
-        # client.
-        LOG.log(5, buf)
+        # Pass on the majority of paho client logging messages at the same
+        # level.
+        # However, the ping messages are a bit verbose and cause 2 log entries
+        # every thirty seconds.  To see these messages set the debug to level
+        # 5
+        verbose = ["Sending PINGREQ", "Sending PINGRESP", "Received PINGREQ",
+                   "Received PINGRESP"]
+        if buf not in verbose:
+            LOG.log(paho.LOGGING_LEVEL[level], buf)
+        else:
+            LOG.log(5, buf)
 
     #-----------------------------------------------------------------------
     def __str__(self):

@@ -56,6 +56,9 @@ class ModemDbGet(Base):
         # ok in Python>=3.5 but not 3.4.
         from .. import db    # pylint: disable=import-outside-toplevel
 
+        if not self._PLM_sent:
+            # If PLM hasn't sent our message yet, this can't be for us
+            return Msg.UNKNOWN
         # Message is an ACK/NAK of the record request.
         if isinstance(msg, (Msg.OutAllLinkGetFirst, Msg.OutAllLinkGetNext)):
             # If we get a NAK, then there are no more db records.
@@ -69,10 +72,11 @@ class ModemDbGet(Base):
                 return Msg.FINISHED
 
             # ACK - keep reading until we get the record we requested.
+            self._PLM_ACK = True
             return Msg.CONTINUE
 
         # Message is the record we requested.
-        if isinstance(msg, Msg.InpAllLinkRec):
+        if isinstance(msg, Msg.InpAllLinkRec) and self._PLM_ACK:
             LOG.info("Adding modem db record for %s grp: %s", msg.addr,
                      msg.group)
             if not msg.db_flags.in_use:
@@ -81,14 +85,17 @@ class ModemDbGet(Base):
                 # Create a modem database entry from the message data and
                 # write it into the database.
                 entry = db.ModemEntry(msg.addr, msg.group,
-                                      msg.db_flags.is_controller, msg.data)
+                                      msg.db_flags.is_controller, msg.data,
+                                      db=self.db)
                 self.db.add_entry(entry)
                 LOG.ui("Entry: %s", entry)
 
             # Request the next record in the PLM database.
             LOG.info("Modem requesting next db record")
             msg = Msg.OutAllLinkGetNext()
-            protocol.send(msg, self)
+            self._PLM_sent = False
+            self._PLM_ACK = False
+            self.db.device.send(msg, self)
 
             # Return finished - this way the getnext message will go out.
             # We'll be used as the handler for that as well which repeats
